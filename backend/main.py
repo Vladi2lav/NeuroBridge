@@ -271,6 +271,51 @@ async def signaling_endpoint(websocket: WebSocket, room_id: str):
             del rooms[room_id][client_id]
 
 import socket
+import os
+import shutil
+from fastapi import File, UploadFile, Form, HTTPException
+from fastapi.responses import FileResponse
+from pydantic import BaseModel
+
+class MaterialGenRequest(BaseModel):
+    title: str
+    description: str
+
+@app.post("/api/rooms/{room_id}/materials/upload")
+async def upload_material(room_id: str, file: UploadFile = File(...)):
+    room_dir = os.path.join("materials", room_id)
+    os.makedirs(room_dir, exist_ok=True)
+    file_path = os.path.join(room_dir, file.filename)
+    with open(file_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+    return {"status": "success", "filename": file.filename}
+
+@app.post("/api/rooms/{room_id}/materials/generate")
+async def generate_material(room_id: str, req: MaterialGenRequest):
+    room_dir = os.path.join("materials", room_id)
+    os.makedirs(room_dir, exist_ok=True)
+    content = f"Лекция: {req.title}\n\nОписание: {req.description}\n\nЗначительный объем текста, представляющий собой лекционный материал.\n(Нейросеть генерирует и сохраняет здесь результаты: лекция успешно создана.)"
+    safe_filename = "".join([c for c in req.title if c.isalpha() or c.isdigit() or c==' ']).rstrip() or "generated"
+    filename = f"{safe_filename}.txt"
+    file_path = os.path.join(room_dir, filename)
+    with open(file_path, "w", encoding="utf-8") as f:
+        f.write(content)
+    return {"status": "success", "filename": filename}
+
+@app.get("/api/rooms/{room_id}/materials")
+def list_materials(room_id: str):
+    room_dir = os.path.join("materials", room_id)
+    if not os.path.exists(room_dir):
+        return {"materials": []}
+    files = os.listdir(room_dir)
+    return {"materials": files}
+
+@app.get("/api/rooms/{room_id}/materials/{filename}")
+def download_material(room_id: str, filename: str):
+    file_path = os.path.join("materials", room_id, filename)
+    if os.path.exists(file_path):
+        return FileResponse(path=file_path, filename=filename)
+    raise HTTPException(status_code=404, detail="File not found")
 
 def get_local_ip():
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
