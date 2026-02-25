@@ -3,6 +3,7 @@ import 'package:go_router/go_router.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:http/http.dart' as http;
 import 'dart:convert';
+import 'multi_select_dropdown.dart';
 
 class MainScreen extends StatefulWidget {
   const MainScreen({super.key});
@@ -13,7 +14,7 @@ class MainScreen extends StatefulWidget {
 
 class _MainScreenState extends State<MainScreen> {
   final TextEditingController _roomController = TextEditingController();
-  String _selectedProfile = 'Нет нарушений';
+  List<String> _selectedProfiles = ['Нет нарушений'];
   bool _isLoading = false;
 
   final List<String> _profiles = [
@@ -34,15 +35,15 @@ class _MainScreenState extends State<MainScreen> {
   Future<void> _loadProfile() async {
     final prefs = await SharedPreferences.getInstance();
     setState(() {
-      _selectedProfile = prefs.getString('user_profile') ?? 'Нет нарушений';
+      _selectedProfiles = prefs.getStringList('user_profiles') ?? ['Нет нарушений'];
     });
   }
 
-  Future<void> _saveProfile(String value) async {
+  Future<void> _saveProfile(List<String> values) async {
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setString('user_profile', value);
+    await prefs.setStringList('user_profiles', values);
     setState(() {
-      _selectedProfile = value;
+      _selectedProfiles = values;
     });
   }
 
@@ -99,11 +100,15 @@ class _MainScreenState extends State<MainScreen> {
         ],
       ),
       body: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 24.0, vertical: 16.0),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
+        child: Align(
+          alignment: Alignment.topCenter,
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 600),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 24.0, vertical: 24.0),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
               // Выбор профиля (радиокнопки в виде выпадающего списка или карточек)
               Card(
                 elevation: 2,
@@ -118,23 +123,11 @@ class _MainScreenState extends State<MainScreen> {
                         style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
                       ),
                       const SizedBox(height: 8),
-                      DropdownButtonFormField<String>(
-                        value: _profiles.contains(_selectedProfile) ? _selectedProfile : _profiles.first,
-                        isExpanded: true,
-                        decoration: InputDecoration(
-                          border: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                          contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-                        ),
-                        items: _profiles.map((profile) {
-                          return DropdownMenuItem(
-                            value: profile,
-                            child: Text(profile),
-                          );
-                        }).toList(),
+                      MultiSelectDropdown(
+                        items: _profiles,
+                        selectedItems: _selectedProfiles,
                         onChanged: (val) {
-                          if (val != null) _saveProfile(val);
+                          _saveProfile(val);
                         },
                       ),
                     ],
@@ -193,7 +186,9 @@ class _MainScreenState extends State<MainScreen> {
               const Spacer(),
             ],
           ),
+         ),
         ),
+       ),
       ),
     );
   }

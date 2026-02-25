@@ -98,9 +98,17 @@ class _CallScreenState extends State<CallScreen> {
   }
   
   void _shareLink() {
-    Clipboard.setData(ClipboardData(text: 'NeuroBridge Комната: ${widget.roomId}'));
+    // В вебе мы можем легко получить домен
+    String url = Uri.base.origin;
+    // Либо если запускаем не в вебе
+    if (url.isEmpty || url.startsWith('file:') || url == 'null') {
+      url = "https://neurobridge.test"; // Заглушка, если это сборка Windows/Android
+    }
+    final fullLink = '$url/#/room/${widget.roomId}';
+    
+    Clipboard.setData(ClipboardData(text: fullLink));
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Номер комнаты скопирован в буфер обмена!'))
+      const SnackBar(content: Text('Ссылка на комнату скопирована в буфер обмена!'))
     );
   }
 
@@ -215,7 +223,7 @@ class _CallScreenState extends State<CallScreen> {
                 _shareLink();
               }, 
               icon: const Icon(Icons.copy), 
-              label: const Text('Скопировать номер')
+              label: const Text('Скопировать ссылку')
             ),
             const SizedBox(height: 20),
             if (_mics.isNotEmpty)

@@ -6,6 +6,7 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:http/http.dart' as http;
 import 'dart:convert';
 import 'call_screen.dart';
+import 'multi_select_dropdown.dart';
 
 class RoomScreen extends StatefulWidget {
   final String roomId;
@@ -21,7 +22,7 @@ class _RoomScreenState extends State<RoomScreen> {
   int _tabIndex = 0; // 0 - Video, 1 - Materials
   bool _callStarted = false;
 
-  String _selectedProfile = 'Нет нарушений';
+  List<String> _selectedProfiles = ['Нет нарушений'];
   final List<String> _profiles = [
     'Нет нарушений',
     'Нарушения зрения',
@@ -40,86 +41,126 @@ class _RoomScreenState extends State<RoomScreen> {
   Future<void> _loadProfile() async {
     final prefs = await SharedPreferences.getInstance();
     setState(() {
-      _selectedProfile = prefs.getString('user_profile') ?? 'Нет нарушений';
+      _selectedProfiles = prefs.getStringList('user_profiles') ?? ['Нет нарушений'];
     });
   }
 
-  Future<void> _saveProfile(String value) async {
+  Future<void> _saveProfile(List<String> values) async {
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setString('user_profile', value);
+    await prefs.setStringList('user_profiles', values);
     setState(() {
-      _selectedProfile = value;
+      _selectedProfiles = values;
     });
   }
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('NeuroBridge'),
-        actions: [
-          IconButton(
-             icon: const Icon(Icons.settings),
-             onPressed: () => context.push('/settings'),
-             tooltip: 'Настройки',
-          )
-        ],
+    bool isVideoCallActive = _tabIndex == 0 && _callStarted;
+
+    return Theme(
+      data: Theme.of(context).copyWith(
+        scaffoldBackgroundColor: isVideoCallActive ? Colors.black : Theme.of(context).scaffoldBackgroundColor,
       ),
-      body: Column(
-        children: [
-           // Верхняя часть (профиль и комната)
-           Padding(
-             padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
-             child: DropdownButtonFormField<String>(
-                value: _profiles.contains(_selectedProfile) ? _selectedProfile : _profiles.first,
-                isExpanded: true,
-                decoration: InputDecoration(
-                   border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
-                   contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-                ),
-                items: _profiles.map((p) => DropdownMenuItem(value: p, child: Text(p))).toList(),
-                onChanged: (val) { if (val != null) _saveProfile(val); },
-             )
-           ),
-           Padding(
-             padding: const EdgeInsets.all(8.0),
-             child: Text('Комната: ${widget.roomId}', style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
-           ),
-           
-           // Основная вкладка (видеозвонок или материалы)
-           Expanded(
-             child: AnimatedSwitcher(
-               duration: const Duration(milliseconds: 300),
-               child: _tabIndex == 0 ? _buildVideoTab() : MaterialsTab(roomId: widget.roomId, isCreator: widget.isCreator),
-             ),
-           )
-        ]
-      ),
-      // Плавающие кнопки в самом низу
-      floatingActionButtonLocation: FloatingActionButtonLocation.centerDocked,
-      floatingActionButton: Padding(
-        padding: const EdgeInsets.all(16.0),
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-          children: [
-            FloatingActionButton.extended(
-              heroTag: 'materials_btn',
-              onPressed: () => setState(() => _tabIndex = 1),
-              icon: const Icon(Icons.folder),
-              label: const Text('Материалы'),
-              backgroundColor: _tabIndex == 1 ? Theme.of(context).colorScheme.primaryContainer : Theme.of(context).colorScheme.surface,
-              foregroundColor: _tabIndex == 1 ? Theme.of(context).colorScheme.onPrimaryContainer : Theme.of(context).colorScheme.onSurface,
-            ),
-            FloatingActionButton.extended(
-              heroTag: 'video_btn',
-              onPressed: () => setState(() => _tabIndex = 0),
-              icon: const Icon(Icons.videocam),
-              label: const Text('Видеозвонок'),
-              backgroundColor: _tabIndex == 0 ? Theme.of(context).colorScheme.primaryContainer : Theme.of(context).colorScheme.surface,
-              foregroundColor: _tabIndex == 0 ? Theme.of(context).colorScheme.onPrimaryContainer : Theme.of(context).colorScheme.onSurface,
-            ),
+      child: Scaffold(
+        appBar: isVideoCallActive ? null : AppBar(
+          title: const Text('NeuroBridge'),
+          actions: [
+            IconButton(
+               icon: const Icon(Icons.settings),
+               onPressed: () => context.push('/settings'),
+               tooltip: 'Настройки',
+            )
           ],
         ),
+        body: SafeArea(
+          child: isVideoCallActive 
+            ? _buildVideoTab() 
+            : Align(
+                alignment: Alignment.topCenter,
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 900),
+                  child: Column(
+                    children: [
+                       // Верхняя часть (профиль и комната)
+                       Padding(
+                         padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
+                         child: MultiSelectDropdown(
+                           items: _profiles,
+                           selectedItems: _selectedProfiles,
+                           onChanged: (val) {
+                             _saveProfile(val);
+                           },
+                         )
+                       ),
+                       Padding(
+                         padding: const EdgeInsets.all(8.0),
+                         child: Text('Комната: ${widget.roomId}', style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+                       ),
+                       
+                       // Основная вкладка (материалы)
+                       Expanded(
+                         child: AnimatedSwitcher(
+                           duration: const Duration(milliseconds: 300),
+                           child: _tabIndex == 0 ? _buildVideoTab() : MaterialsTab(roomId: widget.roomId, isCreator: widget.isCreator),
+                         ),
+                       )
+                    ]
+                  ),
+                ),
+              ),
+        ),
+        bottomNavigationBar: Container(
+           color: isVideoCallActive ? Colors.black : Theme.of(context).colorScheme.surface,
+           height: 80,
+           child: Align(
+              alignment: Alignment.center,
+              child: ConstrainedBox(
+                 constraints: const BoxConstraints(maxWidth: 600),
+                 child: Row(
+                   mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                   children: [
+                     _buildTabButton(1, Icons.folder, 'Материалы', isVideoCallActive),
+                     _buildTabButton(0, Icons.videocam, 'Видеозвонок', isVideoCallActive),
+                   ],
+                 ),
+              ),
+           ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildTabButton(int index, IconData icon, String label, bool isDarkState) {
+    final isSelected = _tabIndex == index;
+    final primaryColor = Theme.of(context).colorScheme.primaryContainer;
+    final onPrimaryColor = Theme.of(context).colorScheme.onPrimaryContainer;
+    
+    Color bgColor;
+    Color fgColor;
+    
+    if (isSelected) {
+      bgColor = primaryColor;
+      fgColor = onPrimaryColor;
+    } else {
+      if (isDarkState) {
+        bgColor = Colors.white12;
+        fgColor = Colors.white70;
+      } else {
+        bgColor = Theme.of(context).colorScheme.surface;
+        fgColor = Theme.of(context).colorScheme.onSurface;
+      }
+    }
+
+    return ElevatedButton.icon(
+      onPressed: () => setState(() => _tabIndex = index),
+      icon: Icon(icon),
+      label: Text(label),
+      style: ElevatedButton.styleFrom(
+        backgroundColor: bgColor,
+        foregroundColor: fgColor,
+        elevation: isSelected ? 2 : 0,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
       ),
     );
   }
