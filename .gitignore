@@ -30,8 +30,10 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
-lib64/
+# lib/ and lib64/ are intentionally NOT ignored globally to prevent ignoring Flutter's lib directory!
+# If you have virtual environments, they are already ignored by venv/ and env/ rules above.
+backend/lib/
+backend/lib64/
 parts/
 sdist/
 var/
@@ -43,8 +45,6 @@ share/python-wheels/
 MANIFEST
 
 # PyInstaller
-#  Usually these files are written by a python script from a template
-#  before PyInstaller builds the exe, so as to inject date/other infos into it.
 *.manifest
 *.spec
 
@@ -74,7 +74,7 @@ dmypy.json
 
 
 # ==============================================================================
-# Flutter / Dart rules (merged from neuro_bridge/.gitignore)
+# Flutter / Dart rules
 # ==============================================================================
 
 # Miscellaneous
@@ -96,11 +96,6 @@ migrate_working_dir/
 *.iws
 .idea/
 
-# The .vscode folder contains launch configuration and tasks you configure in
-# VS Code which you may wish to be included in version control, so this line
-# is commented out by default.
-#.vscode/
-
 # Flutter/Dart/Pub related
 **/doc/api/
 **/ios/Flutter/.last_build_id
@@ -117,7 +112,7 @@ app.*.symbols
 # Obfuscation related
 app.*.map.json
 
-# Android Studio will place build artifacts here
+# Android Studio build artifacts
 **/android/app/debug
 **/android/app/profile
 **/android/app/release
