@@ -1,8 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
-import 'ui/main_screen.dart';
-import 'ui/settings_screen.dart';
-import 'ui/room_screen.dart';
+import '../../ui/main_screen.dart';
+import '../../ui/settings_screen.dart';
+import '../../ui/room_screen.dart';
 
 final appRouter = GoRouter(
   initialLocation: '/main',
