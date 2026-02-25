@@ -1,0 +1,48 @@
+name: neuro_bridge
+description: "AI-платформа для инклюзивного IT-образования, автоматически адаптирующая учебный контент и коммуникацию под потребности конкретного студента."
+publish_to: 'none'
+
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.10.0
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  cupertino_icons: ^1.0.8
+  web_socket_channel: ^3.0.3
+  provider: ^6.1.5
+  mobile_scanner: ^7.2.0
+  cryptography: ^2.9.0
+  camera: ^0.11.4
+  permission_handler: ^12.0.1
+  shared_preferences: ^2.5.4
+  http: ^1.6.0
+  hand_landmarker: ^2.2.0
+
+  # Riverpod: жестко фиксируем стабильную ветку 2.x
+  flutter_riverpod: ^2.6.1
+  riverpod_annotation: ^2.6.1
+
+  go_router: ^17.1.0
+  freezed_annotation: ^3.1.0
+  json_annotation: ^4.9.0
+  dio: ^5.9.1
+  flutter_webrtc: ^0.12.7
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+
+
+  build_runner: ^2.4.13
+  riverpod_generator: ^2.6.1
+  freezed: ^3.1.0
+  json_serializable: ^6.9.0
+
+  flutter_lints: ^3.0.0
+
+flutter:
+  uses-material-design: true
