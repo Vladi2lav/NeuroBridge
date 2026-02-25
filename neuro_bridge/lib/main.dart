@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'core/routing/app_router.dart';
+import 'core/services/voice_assistant.dart';
 
 void main() {
   runApp(
@@ -18,6 +19,44 @@ class NeuroBridgeApp extends StatelessWidget {
     return MaterialApp.router(
       title: 'NeuroBridge',
       debugShowCheckedModeBanner: false,
+      builder: (context, child) {
+        return Stack(
+          children: [
+            if (child != null) child,
+            ValueListenableBuilder<String>(
+              valueListenable: VoiceAssistant().currentSpeechContent,
+              builder: (context, value, _) {
+                if (value.isEmpty) return const SizedBox.shrink();
+                return Positioned(
+                  bottom: 40,
+                  left: 24,
+                  right: 24,
+                  child: IgnorePointer(
+                    child: Material(
+                      color: Colors.transparent,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
+                        decoration: BoxDecoration(
+                          color: Colors.black.withOpacity(0.85),
+                          borderRadius: BorderRadius.circular(16),
+                          boxShadow: const [
+                             BoxShadow(color: Colors.black45, blurRadius: 10, offset: Offset(0, 4))
+                          ]
+                        ),
+                        child: Text(
+                          value,
+                          style: const TextStyle(color: Colors.white, fontSize: 20, fontWeight: FontWeight.w500),
+                          textAlign: TextAlign.center,
+                        ),
+                      ),
+                    ),
+                  ),
+                );
+              },
+            ),
+          ],
+        );
+      },
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(
           seedColor: const Color(0xFF1E3A8A), // Строгий темно-синий

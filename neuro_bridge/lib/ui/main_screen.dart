@@ -4,6 +4,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:http/http.dart' as http;
 import 'dart:convert';
 import 'multi_select_dropdown.dart';
+import '../core/services/voice_assistant.dart';
 
 class MainScreen extends StatefulWidget {
   const MainScreen({super.key});
@@ -29,7 +30,123 @@ class _MainScreenState extends State<MainScreen> {
   @override
   void initState() {
     super.initState();
-    _loadProfile();
+    _loadProfile().then((_) {
+       _initVoice();
+    });
+  }
+
+  Future<void> _initVoice() async {
+    await VoiceAssistant().init();
+    
+    VoiceAssistant().currentContext = VoiceCommandContext(
+      screenName: "MainScreen",
+      onCreateRoom: () => _createRoom(),
+      onJoinRoom: (code) {
+         _roomController.text = code;
+         _joinRoom();
+      },
+      onJoinCall: () {}
+    );
+
+    if (_selectedProfiles.contains("Нарушения зрения")) {
+       VoiceAssistant().activateBlindMode();
+    } else if (_selectedProfiles.length == 1 && _selectedProfiles.first == "Нет нарушений") {
+       _runWelcomeRoutine();
+    }
+  }
+
+  bool _isWelcomeDialogOpen = false;
+
+  void _runWelcomeRoutine() async {
+    if (!mounted) return;
+
+    // Сразу показываем окно до того как загрузится ответ от Gemini, 
+    // чтобы пользователь не ждал текста перед тем как увидеть само всплывающее окно
+    _isWelcomeDialogOpen = true;
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Окно адаптации'),
+        content: const Text('...'), // Будет обновлено, или останется таким пока говорит ИИ
+        actions: [
+          TextButton(onPressed: () {
+            if (_isWelcomeDialogOpen) {
+               _isWelcomeDialogOpen = false;
+               Navigator.pop(ctx);
+               VoiceAssistant().stop();
+               VoiceAssistant().disableBlindMode();
+            }
+          }, child: const Text('Да, я вижу (отключить ИИ)')),
+          TextButton(onPressed: () { 
+            if (_isWelcomeDialogOpen) {
+               _isWelcomeDialogOpen = false;
+               Navigator.pop(ctx);
+               VoiceAssistant().stop();
+               _enableBlind();
+            }
+          }, child: const Text('Нет, я не вижу (включить ИИ)')),
+        ],
+      )
+    );
+
+    final welcomeText = await VoiceAssistant().generateWelcomeSpeech();
+
+    if (!mounted || !_isWelcomeDialogOpen) return;
+
+    // Закрываем окно с загрузкой и показываем с реальным текстом
+    Navigator.pop(context);
+    
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Окно адаптации'),
+        content: Text(welcomeText),
+        actions: [
+          TextButton(onPressed: () {
+            if (_isWelcomeDialogOpen) {
+               _isWelcomeDialogOpen = false;
+               Navigator.pop(ctx);
+               VoiceAssistant().stop();
+               VoiceAssistant().disableBlindMode();
+            }
+          }, child: const Text('Да, я вижу (отключить ИИ)')),
+          TextButton(onPressed: () { 
+            if (_isWelcomeDialogOpen) {
+               _isWelcomeDialogOpen = false;
+               Navigator.pop(ctx);
+               VoiceAssistant().stop();
+               _enableBlind();
+            }
+          }, child: const Text('Нет, я не вижу (включить ИИ)')),
+        ],
+      )
+    );
+
+    // Играем закешированное сгенерированное аудио без лишних запросов к API
+    await VoiceAssistant().speakWelcomeAudio();
+    String answer = await VoiceAssistant().listenOnce();
+
+    if (answer.isNotEmpty && mounted && _isWelcomeDialogOpen) {
+        VoiceAssistant().determineBlindness(answer, (blind) {
+           if (mounted && _isWelcomeDialogOpen) {
+              _isWelcomeDialogOpen = false;
+              Navigator.pop(context);
+              if (blind) {
+                  _enableBlind();
+              } else {
+                  VoiceAssistant().disableBlindMode();
+              }
+           }
+        });
+    }
+  }
+
+  void _enableBlind() {
+     _saveProfile(['Нарушения зрения']);
+     VoiceAssistant().activateBlindMode();
+     setState(() {}); // redraw to hide dropdown
   }
 
   Future<void> _loadProfile() async {
@@ -109,31 +226,38 @@ class _MainScreenState extends State<MainScreen> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-              // Выбор профиля (радиокнопки в виде выпадающего списка или карточек)
-              Card(
-                elevation: 2,
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-                child: Padding(
-                  padding: const EdgeInsets.all(16.0),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      const Text(
-                        'Ваш профиль адаптации',
-                        style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-                      ),
-                      const SizedBox(height: 8),
-                      MultiSelectDropdown(
-                        items: _profiles,
-                        selectedItems: _selectedProfiles,
-                        onChanged: (val) {
-                          _saveProfile(val);
-                        },
-                      ),
-                    ],
+              // Выбор профиля
+              if (!VoiceAssistant().isBlindModeActive)
+                Card(
+                  elevation: 2,
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                  child: Padding(
+                    padding: const EdgeInsets.all(16.0),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text(
+                          'Ваш профиль адаптации',
+                          style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                        ),
+                        const SizedBox(height: 8),
+                        MultiSelectDropdown(
+                          items: _profiles,
+                          selectedItems: _selectedProfiles,
+                          onChanged: (val) {
+                            _saveProfile(val);
+                            if (val.contains("Нарушения зрения")) {
+                               VoiceAssistant().activateBlindMode();
+                               setState((){});
+                            } else {
+                               VoiceAssistant().disableBlindMode();
+                            }
+                          },
+                        ),
+                      ],
+                    ),
                   ),
                 ),
-              ),
               
               const Spacer(),
 

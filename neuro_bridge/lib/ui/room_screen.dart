@@ -7,6 +7,7 @@ import 'package:http/http.dart' as http;
 import 'dart:convert';
 import 'call_screen.dart';
 import 'multi_select_dropdown.dart';
+import '../core/services/voice_assistant.dart';
 
 class RoomScreen extends StatefulWidget {
   final String roomId;
@@ -35,7 +36,25 @@ class _RoomScreenState extends State<RoomScreen> {
   @override
   void initState() {
     super.initState();
-    _loadProfile();
+    _loadProfile().then((_) {
+       _initVoice();
+    });
+  }
+
+  void _initVoice() {
+    VoiceAssistant().currentContext = VoiceCommandContext(
+      screenName: "RoomScreen",
+      onCreateRoom: () {},
+      onJoinRoom: (c) {},
+      onJoinCall: () {
+         if (mounted) setState(() { _callStarted = true; _tabIndex = 0; });
+      }
+    );
+     if (VoiceAssistant().isBlindModeActive && widget.isCreator) {
+        VoiceAssistant().speak("Комната ${widget.roomId}. Вы можете присоединиться к звонку.");
+     } else if (VoiceAssistant().isBlindModeActive) {
+        VoiceAssistant().speak("Вы вошли в комнату ${widget.roomId}. Вы можете присоединиться к звонку.");
+     }
   }
 
   Future<void> _loadProfile() async {
@@ -82,16 +101,23 @@ class _RoomScreenState extends State<RoomScreen> {
                   child: Column(
                     children: [
                        // Верхняя часть (профиль и комната)
-                       Padding(
-                         padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
-                         child: MultiSelectDropdown(
-                           items: _profiles,
-                           selectedItems: _selectedProfiles,
-                           onChanged: (val) {
-                             _saveProfile(val);
-                           },
-                         )
-                       ),
+                       if (!VoiceAssistant().isBlindModeActive)
+                         Padding(
+                           padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
+                           child: MultiSelectDropdown(
+                             items: _profiles,
+                             selectedItems: _selectedProfiles,
+                             onChanged: (val) {
+                               _saveProfile(val);
+                               if (val.contains("Нарушения зрения")) {
+                                  VoiceAssistant().activateBlindMode();
+                                  setState((){});
+                               } else {
+                                  VoiceAssistant().disableBlindMode();
+                               }
+                             },
+                           )
+                         ),
                        Padding(
                          padding: const EdgeInsets.all(8.0),
                          child: Text('Комната: ${widget.roomId}', style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
