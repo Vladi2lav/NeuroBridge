@@ -124,22 +124,34 @@ class _MainScreenState extends State<MainScreen> {
       )
     );
 
-    // Играем закешированное сгенерированное аудио без лишних запросов к API
-    await VoiceAssistant().speakWelcomeAudio();
-    String answer = await VoiceAssistant().listenOnce();
+    // Запускаем бесконечный цикл: говорим, слушаем, ждем, повторяем,
+    // пока пользователь не ответит голосом или не нажмет кнопку в UI
+    bool answered = false;
+    while (!answered && mounted && _isWelcomeDialogOpen) {
+        await VoiceAssistant().speak(welcomeText);
+        
+        if (!mounted || !_isWelcomeDialogOpen) break;
+        String answer = await VoiceAssistant().listenOnce();
 
-    if (answer.isNotEmpty && mounted && _isWelcomeDialogOpen) {
-        VoiceAssistant().determineBlindness(answer, (blind) {
-           if (mounted && _isWelcomeDialogOpen) {
-              _isWelcomeDialogOpen = false;
-              Navigator.pop(context);
-              if (blind) {
-                  _enableBlind();
-              } else {
-                  VoiceAssistant().disableBlindMode();
-              }
-           }
-        });
+        if (answer.isNotEmpty && mounted && _isWelcomeDialogOpen) {
+            answered = true;
+            VoiceAssistant().determineBlindness(answer, (blind) {
+               if (mounted && _isWelcomeDialogOpen) {
+                  _isWelcomeDialogOpen = false;
+                  Navigator.pop(context); // закрываем диалог
+                  if (blind) {
+                      _enableBlind();
+                  } else {
+                      VoiceAssistant().disableBlindMode();
+                  }
+               }
+            });
+        }
+        
+        // Если ответ не получен и диалог всё ещё открыт, ждём 5 секунд перед повтором
+        if (!answered && mounted && _isWelcomeDialogOpen) {
+            await Future.delayed(const Duration(seconds: 5));
+        }
     }
   }
 

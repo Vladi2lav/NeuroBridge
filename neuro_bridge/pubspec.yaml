@@ -35,7 +35,7 @@ dependencies:
   json_annotation: ^4.9.0
   dio: ^5.9.1
   flutter_webrtc: ^0.12.7
-  audioplayers: ^6.5.1
+  flutter_tts: ^4.2.5
 
 dev_dependencies:
   flutter_test:
