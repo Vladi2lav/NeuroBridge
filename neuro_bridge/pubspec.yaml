@@ -23,7 +23,7 @@ dependencies:
   hand_landmarker: ^2.2.0
   file_picker: ^8.1.4
   url_launcher: ^6.3.0
-  speech_to_text: ^6.6.1
+  speech_to_text: ^7.3.0
   google_generative_ai: ^0.4.6
 
   # Riverpod: жестко фиксируем стабильную ветку 2.x

@@ -12,6 +12,8 @@ class WebRTCSignaling {
   Function(MediaStream stream)? onLocalStreamAdded;
   Function(String peerId, MediaStream stream)? onRemoteStreamAdded;
   Function(String peerId)? onPeerLeft;
+  // Добавлено: передача чужих рук и субтитров
+  Function(String peerId, List<dynamic> hands, String subtitle)? onPeerHandsData;
 
   Future<void> initWebRTC() async {
     print('[WebRTC] Получаю доступ к камере и микрофону...');
@@ -80,66 +82,89 @@ class WebRTCSignaling {
     final type = data['type'];
     final fromId = data['from'];
 
-    if (type == 'room_state') {
-      myId = data['my_id'];
-      List<dynamic> peers = data['peers'];
-      print('[WebRTC] Мой ID: $myId, уже есть участники: $peers');
-      
-      for (var p in peers) {
-        final String peerId = p.toString();
-        final pc = await _createPeerConnection(peerId);
-        final offer = await pc.createOffer();
-        await pc.setLocalDescription(offer);
-        _sendToSignaling({
-          'type': 'offer',
-          'to': peerId,
-          'sdp': offer.sdp,
-        });
+    try {
+      switch (type) {
+        case 'room_state':
+          myId = data['my_id'];
+          List<dynamic> peers = data['peers'];
+          print('[WebRTC] Мой ID: $myId, уже есть участники: $peers');
+
+          for (var p in peers) {
+            final String peerId = p.toString();
+            final pc = await _createPeerConnection(peerId);
+            final offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
+            _sendToSignaling({
+              'type': 'offer',
+              'to': peerId,
+              'sdp': offer.sdp,
+            });
+          }
+          break;
+        case 'peer_joined':
+          final String peerId = data['peer_id'];
+          print('[WebRTC] Новый участник присоединился: $peerId');
+          // Prepare pc, wait for their offer
+          await _createPeerConnection(peerId);
+          break;
+        case 'peer_left':
+          final String peerId = data['peer_id'];
+          print('[WebRTC] Участник покинул нас: $peerId');
+          peerConnections[peerId]?.dispose();
+          peerConnections.remove(peerId);
+          onPeerLeft?.call(peerId);
+          break;
+        case 'offer':
+          var pc = peerConnections[fromId];
+          if (pc == null) pc = await _createPeerConnection(fromId);
+
+          await pc.setRemoteDescription(RTCSessionDescription(data['sdp'], data['type']));
+          final answer = await pc.createAnswer();
+          await pc.setLocalDescription(answer);
+          _sendToSignaling({
+            'type': 'answer',
+            'to': fromId,
+            'sdp': answer.sdp,
+          });
+          break;
+        case 'answer':
+          final pc = peerConnections[fromId];
+          if (pc != null) {
+            await pc.setRemoteDescription(RTCSessionDescription(data['sdp'], data['type']));
+          }
+          break;
+        case 'candidate': // Renamed from 'ice_candidate' in the provided edit to match original 'candidate'
+          final pc = peerConnections[fromId];
+          if (pc != null) {
+            final candidateMap = data['candidate'];
+            final candidate = RTCIceCandidate(
+              candidateMap['candidate'],
+              candidateMap['sdpMid'],
+              candidateMap['sdpMLineIndex'],
+            );
+            await pc.addCandidate(candidate);
+          }
+          break;
+        case 'peer_hands_data':
+          // Получили руки от собеседника!
+          onPeerHandsData?.call(fromId, data['hands'] ?? [], data['subtitle'] ?? '');
+          break;
       }
-    } else if (type == 'peer_joined') {
-      final String peerId = data['peer_id'];
-      print('[WebRTC] Новый участник присоединился: $peerId');
-      // Prepare pc, wait for their offer
-      await _createPeerConnection(peerId);
-    } else if (type == 'peer_left') {
-      final String peerId = data['peer_id'];
-      print('[WebRTC] Участник покинул нас: $peerId');
-      peerConnections[peerId]?.dispose();
-      peerConnections.remove(peerId);
-      onPeerLeft?.call(peerId);
-    } else if (type == 'offer') {
-      var pc = peerConnections[fromId];
-      if (pc == null) pc = await _createPeerConnection(fromId);
-      
-      await pc.setRemoteDescription(RTCSessionDescription(data['sdp'], data['type']));
-      final answer = await pc.createAnswer();
-      await pc.setLocalDescription(answer);
-      _sendToSignaling({
-        'type': 'answer',
-        'to': fromId,
-        'sdp': answer.sdp, // null safety checked by SDK optionally, or use answer.sdp
-      });
-    } else if (type == 'answer') {
-      final pc = peerConnections[fromId];
-      if (pc != null) {
-        await pc.setRemoteDescription(RTCSessionDescription(data['sdp'], data['type']));
-      }
-    } else if (type == 'candidate') {
-      final pc = peerConnections[fromId];
-      if (pc != null) {
-        final candidateMap = data['candidate'];
-        final candidate = RTCIceCandidate(
-          candidateMap['candidate'],
-          candidateMap['sdpMid'],
-          candidateMap['sdpMLineIndex'],
-        );
-        await pc.addCandidate(candidate);
-      }
+    } catch (e) {
+      print("Signaling error: $e");
     }
   }
 
   void _sendToSignaling(Map<String, dynamic> data) {
     _channel?.sink.add(json.encode(data));
+  }
+
+  void broadcastHandsData(List<dynamic> hands, String subtitle) {
+    _sendToSignaling({
+      'type': 'peer_hands_data',
+      'hands': hands,
+      'subtitle': subtitle,
+    });
   }
 
   void toggleAudio(bool enabled) {

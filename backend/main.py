@@ -12,6 +12,28 @@ import mediapipe as mp
 from concurrent.futures import ThreadPoolExecutor
 import time
 import math
+import os
+
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+try:
+    from tensorflow.keras.models import load_model
+    gesture_model = load_model('gesture_model.h5')
+    
+    # Читаем реальные классы, на которых модель была обучена
+    classes_path = 'gesture_classes.txt'
+    if os.path.exists(classes_path):
+        with open(classes_path, 'r', encoding='utf-8') as f:
+            gesture_actions = np.array([line.strip() for line in f if line.strip()])
+    else:
+        # Если вдруг файла нет, падаем на запасной вариант
+        gesture_actions = np.array(['Привет'])
+        print("[-] gesture_classes.txt не найден! Субтитры могут быть неверными.")
+        
+    print(f"[+] Модель TensorFlow загружена! Жесты: {gesture_actions.tolist()}")
+except Exception as e:
+    gesture_model = None
+    gesture_actions = []
+    print(f"[-] Модель TensorFlow не найдена (распознавание отключено): {e}")
 
 app = FastAPI()
 
@@ -76,12 +98,19 @@ async def hand_tracking_endpoint(websocket: WebSocket):
     block_pos = None
     block_grabbed = False
     
+    # LSTM Буфер
+    sequence = []
+    current_subtitle = ""
+
     try:
         while True:
             # Читаем сразу бинарные данные, без накладных расходов JSON и Base64
             # Заголовок: 1 байт (format), 4 байта (width), 4 байта (height), 4 байта (rotation) = 13 байт минимум
             data = await websocket.receive_bytes()
+            print(f"📥 [СЕРВЕР] Получен кадр трекинга. Размер: {len(data)} байт")
+            
             if len(data) < 16:
+                print("⚠️ [СЕРВЕР] Игнор: пакет меньше 16 байт")
                 continue
 
             # Парсим заголовок (16 байт)
@@ -89,6 +118,7 @@ async def hand_tracking_endpoint(websocket: WebSocket):
             w = int.from_bytes(data[1:5], byteorder='little')
             h = int.from_bytes(data[5:9], byteorder='little')
             rotation = int.from_bytes(data[9:13], byteorder='little', signed=True)
+            print(f"📋 [СЕРВЕР] Заголовок: format={format_code}, w={w}, h={h}, rot={rotation}")
 
             img_data = data[16:]
             img = None
@@ -102,11 +132,23 @@ async def hand_tracking_endpoint(websocket: WebSocket):
                     if w > 0 and h > 0:
                         nparr = np.frombuffer(img_data, np.uint8).reshape((h, w, 4))
                         img = cv2.cvtColor(nparr, cv2.COLOR_BGRA2BGR)
+                elif format_code == 2: # RGBA8888 (Из Flutter RepaintBoundary)
+                    if w > 0 and h > 0:
+                        nparr = np.frombuffer(img_data, np.uint8)
+                        expected_len = h * w * 4
+                        if len(nparr) == expected_len:
+                            nparr = nparr.reshape((h, w, 4))
+                            img = cv2.cvtColor(nparr, cv2.COLOR_RGBA2BGR)
+                            print("✅ [СЕРВЕР] Изображение RGBA успешно декодировано!")
+                        else:
+                            print(f"❌ [СЕРВЕР] Ошибка размерности RGBA! Ожидалось {expected_len}, пришло {len(nparr)}")
+                            continue
                 else:
                     nparr = np.frombuffer(img_data, np.uint8)
                     img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
                 if img is None:
+                    print("❌ [СЕРВЕР] Не удалось декодировать img (None)")
                     continue
 
                 # Rotate image if rotation is provided (MediaPipe expects upright images)
@@ -123,12 +165,14 @@ async def hand_tracking_endpoint(websocket: WebSocket):
                 # Запускаем MediaPipe в пуле потоков, чтобы он НЕ блочил asyncio event loop!
                 loop = asyncio.get_event_loop()
                 results = await loop.run_in_executor(executor, process_image_sync, img_rgb)
+                print("✅ [СЕРВЕР] MediaPipe обработал кадр!")
             except Exception as e:
-                print(f"Frame processing error: {e}")
+                print(f"🚨 [СЕРВЕР] Ошибка обработки кадра (OpenCV -> MediaPipe): {e}")
                 continue
 
             hand_landmarks_list = []
             if results.multi_hand_landmarks:
+                print(f"✋ [СЕРВЕР] Найдено рук: {len(results.multi_hand_landmarks)}")
                 for idx, hand_landmarks in enumerate(results.multi_hand_landmarks):
                     landmarks = []
                     for lm in hand_landmarks.landmark:
@@ -138,6 +182,8 @@ async def hand_tracking_endpoint(websocket: WebSocket):
                             "z": lm.z
                         })
                     hand_landmarks_list.append(landmarks)
+            # else:
+                print("🔍 [СЕРВЕР] Руки не найдены в этом кадре.")
 
             # Virtual elements logic
             if hand_landmarks_list:
@@ -194,19 +240,54 @@ async def hand_tracking_endpoint(websocket: WebSocket):
                     else:
                         block_grabbed = False
 
+            # --- ИНТЕГРАЦИЯ НЕЙРОСЕТИ (LSTM) ---
+            lh = np.zeros(21*3)
+            rh = np.zeros(21*3)
+            if results.multi_hand_landmarks:
+                for idx, hand_landmarks in enumerate(results.multi_hand_landmarks):
+                    handedness = results.multi_handedness[idx].classification[0].label
+                    res = np.array([[lm.x, lm.y, lm.z] for lm in hand_landmarks.landmark]).flatten()
+                    if handedness == 'Left':
+                        lh = res
+                    else:
+                        rh = res
+            keypoints = np.concatenate([lh, rh])
+            
+            sequence.append(keypoints)
+            sequence = sequence[-30:] # Храним только последние 30 кадров (окно в ~1 сек)
+            
+            if len(sequence) == 30 and gesture_model is not None:
+                # Если в кадре есть хоть какие-то точки
+                if np.sum(sequence) > 0:
+                    try:
+                        # Делаем быстрый предикт прямо тут. Для батча = 1 он мгновенный
+                        res_pred = gesture_model.predict(np.expand_dims(sequence, axis=0), verbose=0)[0]
+                        best_idx = np.argmax(res_pred)
+                        
+                        # Если нейронка уверена на 85%
+                        if res_pred[best_idx] > 0.85: 
+                            current_subtitle = str(gesture_actions[best_idx])
+                    except Exception as e:
+                        pass
+                else:
+                    # Рук нет, можно скрыть субтитр
+                    pass
+
             await websocket.send_json({
                 "type": "hands_data",
                 "hands": hand_landmarks_list,
+                "subtitle": current_subtitle,
                 "virtual_elements": {
                     "button": {"visible": button_visible, "pos": button_pos},
                     "block": {"visible": block_visible, "pos": block_pos, "grabbed": block_grabbed}
                 }
             })
+            print("📤 [СЕРВЕР] Отправлен JSON с координатами обратно на клиент.")
 
     except WebSocketDisconnect:
-        print("Client disconnected from Hand Tracking")
+        print("❌ [СЕРВЕР] Клиент отключился от Hand Tracking")
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"🚨 [СЕРВЕР] Глобальная ошибка вебсокета Hand Tracking: {e}")
 
 import uuid
 from typing import Dict, Any
