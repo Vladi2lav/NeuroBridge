@@ -228,114 +228,287 @@ class _MainScreenState extends State<MainScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final isDesktop = MediaQuery.of(context).size.width > 800;
+    
     return Scaffold(
+      backgroundColor: Theme.of(context).scaffoldBackgroundColor,
       appBar: AppBar(
-        title: const Text('NeuroBridge'),
+        title: const Text('NeuroBridge', style: TextStyle(fontWeight: FontWeight.bold, letterSpacing: 1.2)),
+        centerTitle: true,
+        elevation: 0,
+        backgroundColor: Colors.transparent,
         actions: [
-          IconButton(
-            icon: const Icon(Icons.settings),
-            onPressed: () => context.push('/settings'),
-            tooltip: 'Настройки',
+          Padding(
+            padding: const EdgeInsets.only(right: 8.0),
+            child: IconButton(
+              icon: Icon(Icons.settings_outlined, color: Theme.of(context).colorScheme.primary),
+              onPressed: () => context.push('/settings'),
+              tooltip: 'Настройки',
+            ),
           )
         ],
       ),
-      body: SafeArea(
-        child: Align(
-          alignment: Alignment.topCenter,
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 600),
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 24.0, vertical: 24.0),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-              // Выбор профиля
-              if (!VoiceAssistant().isBlindModeActive)
-                Card(
-                  elevation: 2,
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-                  child: Padding(
-                    padding: const EdgeInsets.all(16.0),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        const Text(
-                          'Ваш профиль адаптации',
-                          style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-                        ),
-                        const SizedBox(height: 8),
-                        MultiSelectDropdown(
-                          items: _profiles,
-                          selectedItems: _selectedProfiles,
-                          onChanged: (val) {
-                            _saveProfile(val);
-                            if (val.contains("Нарушения зрения")) {
-                               VoiceAssistant().activateBlindMode();
-                               setState((){});
-                            } else {
-                               VoiceAssistant().disableBlindMode();
-                            }
-                          },
-                        ),
-                      ],
+      body: Center(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 900),
+          child: SingleChildScrollView(
+            physics: const BouncingScrollPhysics(),
+            padding: EdgeInsets.symmetric(
+              horizontal: isDesktop ? 64.0 : 24.0,
+              vertical: isDesktop ? 48.0 : 24.0,
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                // Текст приветствия
+                RichText(
+                  textAlign: TextAlign.center,
+                  text: TextSpan(
+                    style: Theme.of(context).textTheme.headlineMedium?.copyWith(
+                      fontWeight: FontWeight.bold,
+                      height: 1.2,
                     ),
+                    children: [
+                      const TextSpan(text: 'Инклюзивное общение\nбез '),
+                      TextSpan(
+                        text: 'границ',
+                        style: TextStyle(color: Theme.of(context).colorScheme.primary),
+                      ),
+                    ],
                   ),
                 ),
-              
-              const Spacer(),
+                const SizedBox(height: 16),
+                Text(
+                  'Создавайте комнаты, подключайтесь к звонкам и используйте персонализированные инструменты доступности.',
+                  textAlign: TextAlign.center,
+                  style: Theme.of(context).textTheme.bodyLarge?.copyWith(
+                    color: Theme.of(context).colorScheme.onSurface.withOpacity(0.6),
+                  ),
+                ),
+                
+                SizedBox(height: isDesktop ? 64 : 40),
 
-              // Кнопка Создать
-              ElevatedButton.icon(
-                onPressed: _isLoading ? null : _createRoom,
-                icon: _isLoading ? const SizedBox(width: 24, height: 24, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.add_circle_outline),
-                label: Text(_isLoading ? 'Создание...' : 'Создать комнату', style: const TextStyle(fontSize: 18)),
-                style: ElevatedButton.styleFrom(
-                  padding: const EdgeInsets.all(16),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-                  backgroundColor: Theme.of(context).colorScheme.primaryContainer,
-                  foregroundColor: Theme.of(context).colorScheme.onPrimaryContainer,
+                // Основной блок действий
+                LayoutBuilder(
+                  builder: (context, constraints) {
+                    if (isDesktop) {
+                      return Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Expanded(
+                            child: _buildCreateRoomSection(),
+                          ),
+                          const SizedBox(width: 40),
+                          Expanded(
+                            child: _buildJoinRoomSection(),
+                          ),
+                        ],
+                      );
+                    } else {
+                      return Column(
+                        children: [
+                          _buildCreateRoomSection(),
+                          const SizedBox(height: 32),
+                          const Row(
+                            children: [
+                              Expanded(child: Divider()),
+                              Padding(padding: EdgeInsets.symmetric(horizontal: 16), child: Text('ИЛИ', style: TextStyle(color: Colors.grey, fontWeight: FontWeight.bold))),
+                              Expanded(child: Divider()),
+                            ],
+                          ),
+                          const SizedBox(height: 32),
+                          _buildJoinRoomSection(),
+                        ],
+                      );
+                    }
+                  },
                 ),
-              ),
-              
-              const SizedBox(height: 32),
-              
-              const Row(
-                children: [
-                  Expanded(child: Divider()),
-                  Padding(padding: EdgeInsets.symmetric(horizontal: 16), child: Text('ИЛИ', style: TextStyle(color: Colors.grey))),
-                  Expanded(child: Divider()),
-                ],
-              ),
-              
-              const SizedBox(height: 32),
+                
+                SizedBox(height: isDesktop ? 48 : 32),
+                
+                // Профиль адаптации вынесен ниже
+                if (!VoiceAssistant().isBlindModeActive)
+                  _buildProfileCard(),
+                  
+                const SizedBox(height: 40),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
 
-              // Поле ввода и кнопка Присоединиться
-              TextField(
-                controller: _roomController,
-                decoration: InputDecoration(
-                  labelText: 'Номер комнаты',
-                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(16)),
-                  prefixIcon: const Icon(Icons.meeting_room),
-                ),
-                keyboardType: TextInputType.number,
-                onSubmitted: (_) => _joinRoom(),
+  Widget _buildCreateRoomSection() {
+    return Container(
+      padding: const EdgeInsets.all(32),
+      decoration: BoxDecoration(
+        color: Theme.of(context).colorScheme.surface,
+        borderRadius: BorderRadius.circular(24),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.04),
+            blurRadius: 24,
+            offset: const Offset(0, 8),
+          ),
+        ],
+        border: Border.all(color: Theme.of(context).colorScheme.primary.withOpacity(0.1)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: Theme.of(context).colorScheme.primaryContainer.withOpacity(0.5),
+              borderRadius: BorderRadius.circular(16),
+            ),
+            child: Icon(Icons.video_call_rounded, size: 32, color: Theme.of(context).colorScheme.primary),
+          ),
+          const SizedBox(height: 24),
+          const Text(
+            'Начать встречу',
+            style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            'Создайте новую защищенную комнату и пригласите участников.',
+            style: TextStyle(color: Theme.of(context).colorScheme.onSurface.withOpacity(0.6), height: 1.5),
+          ),
+          const SizedBox(height: 32),
+          SizedBox(
+            width: double.infinity,
+            height: 56,
+            child: ElevatedButton.icon(
+              onPressed: _isLoading ? null : _createRoom,
+              icon: _isLoading ? const SizedBox(width: 24, height: 24, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white)) : const Icon(Icons.add),
+              label: Text(
+                _isLoading ? 'Создание...' : 'Новая комната', 
+                style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600)
               ),
-              const SizedBox(height: 16),
-              ElevatedButton.icon(
-                onPressed: _joinRoom,
-                icon: const Icon(Icons.group_add),
-                label: const Text('Присоединиться', style: TextStyle(fontSize: 18)),
-                style: ElevatedButton.styleFrom(
-                  padding: const EdgeInsets.all(16),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-                ),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Theme.of(context).colorScheme.primary,
+                foregroundColor: Theme.of(context).colorScheme.onPrimary,
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                elevation: 0,
               ),
-              const Spacer(),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildJoinRoomSection() {
+    return Container(
+      padding: const EdgeInsets.all(32),
+      decoration: BoxDecoration(
+        color: Theme.of(context).colorScheme.surface,
+        borderRadius: BorderRadius.circular(24),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.04),
+            blurRadius: 24,
+            offset: const Offset(0, 8),
+          ),
+        ],
+        border: Border.all(color: Theme.of(context).colorScheme.secondary.withOpacity(0.1)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: Theme.of(context).colorScheme.secondaryContainer.withOpacity(0.5),
+              borderRadius: BorderRadius.circular(16),
+            ),
+            child: Icon(Icons.meeting_room_rounded, size: 32, color: Theme.of(context).colorScheme.secondary),
+          ),
+          const SizedBox(height: 24),
+          const Text(
+            'Присоединиться',
+            style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            'Введите код встречи, предоставленный организатором.',
+            style: TextStyle(color: Theme.of(context).colorScheme.onSurface.withOpacity(0.6), height: 1.5),
+          ),
+          const SizedBox(height: 24),
+          TextField(
+            controller: _roomController,
+            decoration: InputDecoration(
+              labelText: 'Код комнаты',
+              border: OutlineInputBorder(borderRadius: BorderRadius.circular(16)),
+              prefixIcon: Icon(Icons.dialpad, color: Theme.of(context).colorScheme.onSurface.withOpacity(0.5)),
+            ),
+            keyboardType: TextInputType.number,
+            onSubmitted: (_) => _joinRoom(),
+          ),
+          const SizedBox(height: 16),
+          SizedBox(
+            width: double.infinity,
+            height: 56,
+            child: ElevatedButton(
+              onPressed: _joinRoom,
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Theme.of(context).colorScheme.secondaryContainer,
+                foregroundColor: Theme.of(context).colorScheme.onSecondaryContainer,
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                elevation: 0,
+              ),
+              child: const Text('Присоединиться', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildProfileCard() {
+    return Container(
+      padding: const EdgeInsets.all(24),
+      decoration: BoxDecoration(
+        color: Theme.of(context).colorScheme.surface,
+        borderRadius: BorderRadius.circular(20),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.02),
+            blurRadius: 10,
+            offset: const Offset(0, 4),
+          ),
+        ],
+        border: Border.all(color: Theme.of(context).colorScheme.outline.withOpacity(0.1)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.accessibility_new_rounded, color: Theme.of(context).colorScheme.primary),
+              const SizedBox(width: 12),
+              const Text(
+                'Профиль адаптации',
+                style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
+              ),
             ],
           ),
-         ),
-        ),
-       ),
+          const SizedBox(height: 16),
+          MultiSelectDropdown(
+            items: _profiles,
+            selectedItems: _selectedProfiles,
+            onChanged: (val) {
+              _saveProfile(val);
+              if (val.contains("Нарушения зрения")) {
+                 VoiceAssistant().activateBlindMode();
+                 setState((){});
+              } else {
+                 VoiceAssistant().disableBlindMode();
+              }
+            },
+          ),
+        ],
       ),
     );
   }
