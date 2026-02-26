@@ -6,6 +6,8 @@ import 'dart:convert';
 import 'dart:typed_data';
 import '../config/env.dart';
 import 'dart:async';
+import 'package:flutter/services.dart';
+import '../routing/app_router.dart';
 
 class VoiceCommandContext {
   final String screenName;
@@ -94,10 +96,12 @@ class VoiceAssistant {
 Описание экрана: ${currentContext?.description ?? ''}.
 
 Доступные функции:
+- [ACTION:GO_MAIN_MENU]: Вернуться в главное меню, закрыть звонок, завершить звонок, покинуть комнату.
+- [ACTION:EXIT_APP]: Выйти из приложения полностью, закрыть приложение.
 $localActions
 
 Если пользователь просит помощи, понятно перечисли эти функции.
-Если пользователь хочет выполнить одно из действий (создать, присоединиться, открыть настройки) - ВЕРНИ ТОЛЬКО ТЕГ [ACTION:код_действия] без других слов. При присоединении используй формат [ACTION:JOIN_ROOM|код].
+Если пользователь хочет выполнить одно из действий (создать, присоединиться, открыть настройки, вернуться в меню, выйти и т.д.) - ВЕРНИ ТОЛЬКО ТЕГ [ACTION:код_действия] без других слов. При присоединении используй формат [ACTION:JOIN_ROOM|код].
 Если это обычный вопрос - отвечай вежливо.
 ''';
 
@@ -346,7 +350,14 @@ $localActions
          if (match != null && match.groupCount > 0) {
              final actionCall = match.group(1)!;
              await speak("Выполняю.");
-             currentContext!.onAction(actionCall);
+             
+             if (actionCall == "EXIT_APP") {
+                 SystemNavigator.pop();
+             } else if (actionCall == "GO_MAIN_MENU") {
+                 appRouter.go('/main');
+             } else if (currentContext != null) {
+                 currentContext!.onAction(actionCall);
+             }
          }
      } else {
          if (resText.isNotEmpty) {
