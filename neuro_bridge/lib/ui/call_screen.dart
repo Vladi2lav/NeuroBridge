@@ -2,15 +2,14 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
-import 'package:flutter/foundation.dart';
+import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
-import 'package:camera/camera.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
-import 'package:hand_landmarker/hand_landmarker.dart';
+import 'package:speech_to_text/speech_to_text.dart' as stt;
 import '../core/services/webrtc_signaling.dart';
 
 class CallScreen extends StatefulWidget {
@@ -40,66 +39,56 @@ class _CallScreenState extends State<CallScreen> {
   // --- ДЛЯ НЕЙРОСЕТИ И ТРЕКИНГА ---
   WebSocketChannel? _trackingChannel;
   List<dynamic> _backendHands = [];
-  Map<String, dynamic> _virtualElements = {}; // Виртуальные кнопки и блоки от сервера
-  String _currentSubtitle = "";
-  Timer? _subtitleTimer;
   
-  // --- CAMERA MODULE (LOCAL LIKE FUNCTIONAL-BETA) ---
-  CameraController? _cameraController;
-  bool _cameraInitialized = false;
-  int _lastFrameTime = 0;
-  bool _isWaitingForServerResponse = false;
-  Size? _imageSize; // Размер кадра с камеры
-  bool _isProcessingFrame = false; // <-- ВЕРНУЛ ПЕРЕМЕННУЮ
-
-  // Данные трекинга от других участников (ВЕРНУЛ ПЕРЕМЕННЫЕ)
+  // Данные трекинга от других участников
   Map<String, List<dynamic>> _peerHands = {};
-  Map<String, String> _peerSubtitles = {};
-  Map<String, Timer?> _peerSubtitleTimers = {};
 
-  // Локальный ML Kit трекинг (как в бете) ТОЛЬКО для отрисовки поверх себя
-  HandLandmarkerPlugin? _handLandmarker;
-  List<Hand> _localHands = [];
+  // Общий чат для субтитров и жестов
+  List<Map<String, String>> _chatMessages = [];
+  String _myActiveSpeech = "";
+  Map<String, String> _peerActiveSpeech = {};
+  
+  String _myLastHandGesture = "";
+
+  // Ключ для "фотографирования" нашего видео
+  final GlobalKey _localVideoKey = GlobalKey();
+  Timer? _frameCaptureTimer;
+  bool _isProcessingFrame = false;
+  bool _isAwaitingServer = false; // ОЖИДАНИЕ ОТВЕТА СЕРВЕРА (Защита от очередей)
+  
+  // Распознавание речи для субтитров
+  final stt.SpeechToText _speech = stt.SpeechToText();
+  bool _isSpeechInitialized = false;
+
+  void _addMessage(String sender, String text) {
+    if (text.isEmpty) return;
+    
+    final msg = {"sender": sender, "text": text};
+    
+    setState(() {
+      _chatMessages.add(msg);
+      if (_chatMessages.length > 30) {
+        _chatMessages.removeAt(0); // Ограничиваем историю
+      }
+    });
+    
+    // На мобильных экранах удаляем сообщение через 2.5 сек, чтобы не засорять 
+    final isMobile = MediaQuery.of(context).size.width <= 600;
+    if (isMobile) {
+       Timer(const Duration(milliseconds: 2500), () {
+          if (mounted && _chatMessages.contains(msg)) {
+             setState(() {
+                _chatMessages.remove(msg);
+             });
+          }
+       });
+    }
+  }
 
   @override
   void initState() {
     super.initState();
-    _initHandLandmarker();
-    _initCamera();
     _initWebRtcInfo();
-  }
-
-  Future<void> _initHandLandmarker() async {
-     _handLandmarker = HandLandmarkerPlugin.create(
-        numHands: 2,
-        delegate: HandLandmarkerDelegate.gpu,
-     );
-  }
-
-  Future<void> _initCamera() async {
-    final cameras = await availableCameras();
-    if (cameras.isEmpty) return;
-    
-    final camera = cameras.firstWhere(
-      (c) => c.lensDirection == CameraLensDirection.front,
-      orElse: () => cameras.first,
-    );
-
-    _cameraController = CameraController(
-      camera,
-      ResolutionPreset.low,
-      enableAudio: false,
-      imageFormatGroup: !kIsWeb && Platform.isAndroid ? ImageFormatGroup.yuv420 : ImageFormatGroup.bgra8888, 
-    );
-
-    await _cameraController!.initialize();
-    setState(() => _cameraInitialized = true);
-    
-    if (!kIsWeb) {
-       _startCameraStream();
-    } else {
-       print("⚠️ [ТРЕКИНГ] Web-версия (Браузер) не поддерживает startImageStream для камеры! Обработки рук не будет. Запустите на Windows или Android.");
-    }
   }
 
   Future<void> _initWebRtcInfo() async {
@@ -130,7 +119,7 @@ class _CallScreenState extends State<CallScreen> {
         _remoteRenderers[peerId]?.dispose();
         _remoteRenderers.remove(peerId);
         _peerHands.remove(peerId);
-        _peerSubtitles.remove(peerId);
+        _peerActiveSpeech.remove(peerId);
         if (_mainUserId == peerId) {
           _mainUserId = _remoteRenderers.isNotEmpty ? _remoteRenderers.keys.first : null;
         }
@@ -141,12 +130,13 @@ class _CallScreenState extends State<CallScreen> {
       if (!mounted) return;
       setState(() {
         _peerHands[peerId] = remoteHands;
-        if (remoteSubtitle.isNotEmpty) {
-           _peerSubtitles[peerId] = remoteSubtitle;
-           _peerSubtitleTimers[peerId]?.cancel();
-           _peerSubtitleTimers[peerId] = Timer(const Duration(seconds: 3), () {
-             if (mounted) setState(() => _peerSubtitles[peerId] = "");
-           });
+        if (remoteSubtitle.startsWith("SPEECH:")) {
+           _peerActiveSpeech[peerId] = remoteSubtitle.substring(7);
+        } else if (remoteSubtitle.startsWith("FINAL_SPEECH:")) {
+           _peerActiveSpeech.remove(peerId);
+           _addMessage("Участник", remoteSubtitle.substring(13));
+        } else if (remoteSubtitle.startsWith("GESTURE:")) {
+           _addMessage("Участник (Жест)", remoteSubtitle.substring(8));
         }
       });
     };
@@ -166,8 +156,56 @@ class _CallScreenState extends State<CallScreen> {
       }
       _isLoading = false;
     });
+    
+    // Инициализируем STT для живой речи
+    try {
+       _isSpeechInitialized = await _speech.initialize(
+         onStatus: (status) {
+            // Если STT остановилось (пауза в речи), но микрофон включен - запускаем снова
+            if (status == 'notListening' && _isAudioOn && mounted) {
+               _startListeningSpeech();
+            }
+         },
+         onError: (e) => print("STT ошибка: $e")
+       );
+       if (_isSpeechInitialized && _isAudioOn) {
+          _startListeningSpeech();
+       }
+    } catch (e) {
+       print("Ошибка инита STT: $e");
+    }
 
     _connectTrackingWS(ip);
+  }
+
+  void _startListeningSpeech() {
+     if (!_isSpeechInitialized || !_isAudioOn) return;
+     _speech.listen(
+       localeId: 'ru_RU',
+       cancelOnError: false,
+       partialResults: true,
+       onResult: (result) {
+          if (result.recognizedWords.isNotEmpty && mounted) {
+             setState(() {
+                _myActiveSpeech = result.recognizedWords;
+             });
+             
+             if (result.finalResult) {
+                 _addMessage("Вы", result.recognizedWords);
+                 _myActiveSpeech = "";
+                 _signaling.broadcastHandsData(_backendHands, "FINAL_SPEECH:${result.recognizedWords}");
+             } else {
+                 _signaling.broadcastHandsData(_backendHands, "SPEECH:${result.recognizedWords}");
+             }
+          }
+       }
+     );
+  }
+
+  void _stopListeningSpeech() {
+     if (_isSpeechInitialized) {
+        _speech.stop();
+     }
   }
 
   void _connectTrackingWS(String ip) {
@@ -175,32 +213,29 @@ class _CallScreenState extends State<CallScreen> {
       _trackingChannel = WebSocketChannel.connect(Uri.parse('ws://$ip:8001/ws/hand_tracking'));
       
       // СРАЗУ ПОСЛЕ ПОДКЛЮЧЕНИЯ ЗАПУСКАЕМ СБОР КАДРОВ
-      // Сбор кадров теперь запускается в _initCamera через _startCameraStream(). 
-      // _startCaptureLoop() удален, так как мы не используем RepaintBoundary.
+      _startCaptureLoop();
       
       _trackingChannel!.stream.listen((message) {
+        if (mounted) setState(() => _isAwaitingServer = false); // СЕРВЕР ОТВЕТИЛ! Разрешаем слать новый кадр
+        
         try {
           final data = jsonDecode(message);
           if (data['type'] == 'hands_data') {
             setState(() {
               _backendHands = data['hands'] ?? [];
               
-              if (data['virtual_elements'] != null) {
-                _virtualElements = data['virtual_elements'];
-              }
+              String incomingSubtitle = data['subtitle']?.toString() ?? "";
               
-              if (data['subtitle'] != null && data['subtitle'].toString().isNotEmpty) {
-                _currentSubtitle = data['subtitle'];
-                
-                // Таймер для скрытия субтитров через 3 секунды
-                _subtitleTimer?.cancel();
-                _subtitleTimer = Timer(const Duration(seconds: 3), () {
-                  if (mounted) setState(() => _currentSubtitle = "");
-                });
+              if (incomingSubtitle.isNotEmpty && incomingSubtitle != _myLastHandGesture) {
+                  _addMessage("Вы (Жест)", incomingSubtitle);
+                  _signaling.broadcastHandsData(_backendHands, "GESTURE:$incomingSubtitle");
               }
+              _myLastHandGesture = incomingSubtitle;
               
-              // Транслируем свои руки остальным участникам
-              _signaling.broadcastHandsData(_backendHands, _currentSubtitle);
+              // Для трансляции только самих рук
+              if (incomingSubtitle.isEmpty) {
+                 _signaling.broadcastHandsData(_backendHands, "");
+              }
             });
           }
         } catch (e) {
@@ -214,79 +249,57 @@ class _CallScreenState extends State<CallScreen> {
     }
   }
 
-  // --- ЛОГИКА ОТПРАВКИ КАДРОВ ИЗ CAMERA (КАК В FUNCTIONAL-BETA) ---
-  void _startCameraStream() {
-    if (_cameraController == null) return;
-    
-    _cameraController!.startImageStream((image) async {
-       if (_isProcessingFrame) return;
+  // --- ЛОГИКА ОТПРАВКИ КАДРОВ ---
+  void _startCaptureLoop() {
+    print("🚀 [ТРЕКИНГ] Запуск умного адаптивного потока кадров...");
+    _frameCaptureTimer = Timer.periodic(const Duration(milliseconds: 50), (timer) async {
+       if (_isProcessingFrame || _isAwaitingServer || _trackingChannel == null) return;
        _isProcessingFrame = true;
 
-       if (_imageSize == null) {
-          setState(() {
-             _imageSize = Size(image.width.toDouble(), image.height.toDouble());
-          });
-       }
-
-       Uint8List finalBytes;
-       if (!kIsWeb && Platform.isAndroid && image.format.group == ImageFormatGroup.yuv420) {
-           var builder = BytesBuilder();
-           builder.add(image.planes[0].bytes);
-           builder.add(image.planes[2].bytes);
-           builder.add([0]);
-           finalBytes = builder.toBytes();
-       } else {
-           final WriteBuffer allBytes = WriteBuffer();
-           for (final Plane plane in image.planes) {
-             allBytes.putUint8List(plane.bytes);
-           }
-           finalBytes = allBytes.done().buffer.asUint8List();
-       }
-
-       final int currentTime = DateTime.now().millisecondsSinceEpoch;
-
-       // 1. ОТПРАВКА НА СЕРВЕР WS
-       if (_trackingChannel != null && !_isWaitingForServerResponse) {
-          if (currentTime - _lastFrameTime >= 50) {
-             _lastFrameTime = currentTime;
-             _isWaitingForServerResponse = true;
+       try {
+         RenderRepaintBoundary? boundary = _localVideoKey.currentContext?.findRenderObject() as RenderRepaintBoundary?;
+         if (boundary != null) {
+           ui.Image image = await boundary.toImage(pixelRatio: 0.3); // Увеличено в 1.5 раза (было 0.2)
+           ByteData? byteData = await image.toByteData(format: ui.ImageByteFormat.rawRgba);
+           
+           if (byteData != null) {
+             final bytes = byteData.buffer.asUint8List();
+             // print("📸 [ТРЕКИНГ] Успешный снимок кадра: ${image.width}x${image.height}, bytes: ${bytes.length}");
              
-             try {
-                int formatCode = (!kIsWeb && Platform.isAndroid) ? 0 : 1; // 0=NV21, 1=BGRA
-                var header = ByteData(16);
-                header.setUint8(0, formatCode);
-                header.setUint32(1, image.width, Endian.little);
-                header.setUint32(5, image.height, Endian.little);
-                header.setInt32(9, _cameraController!.description.sensorOrientation, Endian.little);
-
-                var builder = BytesBuilder();
-                builder.add(header.buffer.asUint8List());
-                builder.add(finalBytes);
-                
-                _trackingChannel!.sink.add(builder.toBytes());
-                
-                Future.delayed(const Duration(milliseconds: 150), () {
-                   if (mounted) _isWaitingForServerResponse = false;
-                });
-             } catch (e) {
-                print("🚨 Ошибка отправки кадра на сервер: $e");
-                _isWaitingForServerResponse = false;
-             }
-          }
+             int formatCode = 2; // RGBA8888! 
+             var header = ByteData(16);
+             header.setUint8(0, formatCode);
+             header.setUint32(1, image.width, Endian.little);
+             header.setUint32(5, image.height, Endian.little);
+             header.setInt32(9, 0, Endian.little);
+             
+             var builder = BytesBuilder();
+             builder.add(header.buffer.asUint8List());
+             builder.add(bytes);
+             
+             _trackingChannel!.sink.add(builder.toBytes());
+             
+             // БЛОКИРУЕМ ОТПРАВКУ ДО ОТВЕТА
+             setState(() => _isAwaitingServer = true);
+             
+             // Резервный таймаут, вдруг пакет потерялся
+             // ОШИБКА: 500ms было слишком мало! Если сервер отвечал дольше, таймер спамил 
+             // новыми кадрами, создавая бесконечную очередь, что приводило к задержкам по 30 сек.
+             Timer(const Duration(milliseconds: 5000), () {
+                 if (mounted && _isAwaitingServer) {
+                     setState(() => _isAwaitingServer = false);
+                 }
+             });
+             
+           } else {
+             print("❌ [ТРЕКИНГ] Не удалось получить byteData (NULL)");
+           }
+         } else {
+             // print("⏳ [ТРЕКИНГ] Ожидаем отрисовки видео WebRTC (виджет не готов)...");
+         }
+       } catch (e) {
+         print("🚨 [ТРЕКИНГ] Ошибка при снятии скриншота: $e");
        }
-       
-       // 2. ЛОКАЛЬНАЯ ОТРИСОВКА ML KIT ДЛЯ СЕБЯ (КАК В БЕТЕ)
-       if (_handLandmarker != null) {
-          try {
-             final hands = _handLandmarker!.detect(image, _cameraController!.description.sensorOrientation);
-             if (mounted) {
-               setState(() {
-                 _localHands = hands;
-               });
-             }
-          } catch(e) { }
-       }
-       
        _isProcessingFrame = false;
     });
   }
@@ -296,6 +309,12 @@ class _CallScreenState extends State<CallScreen> {
     setState(() {
       _isAudioOn = !_isAudioOn;
       _signaling.toggleAudio(_isAudioOn);
+      
+      if (_isAudioOn) {
+         _startListeningSpeech();
+      } else {
+         _stopListeningSpeech();
+      }
     });
   }
 
@@ -330,18 +349,74 @@ class _CallScreenState extends State<CallScreen> {
 
   @override
   void dispose() {
-    _cameraController?.stopImageStream();
-    _cameraController?.dispose();
-    _handLandmarker?.dispose();
     _signaling.dispose();
     _localRenderer.dispose();
     for (var r in _remoteRenderers.values) {
       r.dispose();
     }
     
+    _stopListeningSpeech();
+    _frameCaptureTimer?.cancel();
     _trackingChannel?.sink.close();
-    _subtitleTimer?.cancel();
     super.dispose();
+  }
+
+  Widget _buildChatPanel({bool isMobile = false}) {
+    List<Widget> messages = [];
+    for (var msg in _chatMessages) {
+       messages.add(Container(
+         margin: const EdgeInsets.only(bottom: 6),
+         padding: const EdgeInsets.all(8),
+         decoration: BoxDecoration(
+            color: msg['sender']!.startsWith('Вы') ? Colors.blueAccent.withOpacity(isMobile ? 0.6 : 0.3) : Colors.grey.withOpacity(isMobile ? 0.6 : 0.3),
+            borderRadius: BorderRadius.circular(8)
+         ),
+         child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+               Text(msg['sender']!, style: const TextStyle(color: Colors.cyanAccent, fontSize: 10, fontWeight: FontWeight.bold)),
+               const SizedBox(height: 2),
+               Text(msg['text']!, style: const TextStyle(color: Colors.white, fontSize: 15)),
+            ]
+         )
+       ));
+    }
+    
+    if (_myActiveSpeech.isNotEmpty) {
+       messages.add(Container(
+           margin: const EdgeInsets.only(bottom: 6),
+           padding: const EdgeInsets.all(8),
+           decoration: BoxDecoration(color: Colors.blue.withOpacity(isMobile ? 0.4 : 0.1), borderRadius: BorderRadius.circular(8)),
+           child: Text("Вы: $_myActiveSpeech...", style: const TextStyle(color: Colors.white70, fontStyle: FontStyle.italic)),
+       ));
+    }
+    for (var peer in _peerActiveSpeech.entries) {
+       messages.add(Container(
+           margin: const EdgeInsets.only(bottom: 6),
+           padding: const EdgeInsets.all(8),
+           decoration: BoxDecoration(color: Colors.grey.withOpacity(isMobile ? 0.4 : 0.1), borderRadius: BorderRadius.circular(8)),
+           child: Text("Участник: ${peer.value}...", style: const TextStyle(color: Colors.white70, fontStyle: FontStyle.italic)),
+       ));
+    }
+
+    return Container(
+       color: isMobile ? Colors.transparent : Colors.black54,
+       child: Column(
+          children: [
+             if (!isMobile)
+                const Padding(
+                   padding: EdgeInsets.all(8),
+                   child: Text("Субтитры", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 16))
+                ),
+             Expanded(
+                child: ListView(
+                   padding: isMobile ? const EdgeInsets.all(0) : const EdgeInsets.all(8),
+                   children: messages,
+                )
+             )
+          ]
+       )
+    );
   }
 
   Widget _buildControlsPanel({required bool isDesktop}) {
@@ -470,39 +545,8 @@ class _CallScreenState extends State<CallScreen> {
            child: ClipRRect(
               borderRadius: BorderRadius.circular(8),
               child: Stack(
-                fit: StackFit.expand,
                 children: [
                    RTCVideoView(renderer, mirror: mirror, objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover),
-                   Positioned(
-                     bottom: 4, left: 4, 
-                     child: Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
-                        color: Colors.black54,
-                        child: Text(label, style: const TextStyle(color: Colors.white, fontSize: 10))
-                     )
-                   )
-                ]
-              )
-           )
-        )
-     );
-  }
-
-  Widget _buildSmallCamera(String label, VoidCallback onTap) {
-     return GestureDetector(
-        onTap: onTap,
-        child: Container(
-           margin: const EdgeInsets.only(bottom: 8, right: 8),
-           width: 160,
-           height: 120,
-           decoration: BoxDecoration(color: Colors.black54, borderRadius: BorderRadius.circular(8)),
-           child: ClipRRect(
-              borderRadius: BorderRadius.circular(8),
-              child: Stack(
-                fit: StackFit.expand,
-                children: [
-                   if (_cameraInitialized && _cameraController != null)
-                     CameraPreview(_cameraController!),
                    Positioned(
                      bottom: 4, left: 4, 
                      child: Container(
@@ -525,10 +569,13 @@ class _CallScreenState extends State<CallScreen> {
      List<Widget> gridItems = [];
      
      if (!isMeMain) {
-       // Локальное видео рендерим ЧЕРЕЗ CAMERA PLUGIN как просил юзер: "мой блок видео, скопировать"
-       gridItems.add(_buildSmallCamera('Вы', () {
+       // Оборачиваем маленькое окошко в RepaintBoundary, чтобы снимать кадры отсюда
+       gridItems.add(RepaintBoundary(
+         key: _localVideoKey,
+         child: _buildSmallVideo('Вы', _localRenderer, true, () {
            setState(() => _mainUserId = null);
-       }));
+         })
+       ));
      }
      
      int userCounter = 1;
@@ -542,68 +589,74 @@ class _CallScreenState extends State<CallScreen> {
      }
      
      Widget mainVideoWidget = Container();
-     if (isMeMain && _cameraInitialized) {
-       // Если мы - главные, показываем CameraPreview как в functional-beta
+     if (mainRenderer != null) {
+       Widget videoView = RTCVideoView(mainRenderer, mirror: isMeMain, objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover);
+       
+       // Оборачиваем большое окошко, если локальное видео на весь экран
+       if (isMeMain) {
+         videoView = RepaintBoundary(
+           key: _localVideoKey,
+           child: videoView,
+         );
+       }
+       
+       
+       // СМОТРИМ, ЧЬИ РУКИ ОТОБРАЖАТЬ ПО СЕРЕДИНЕ:
+       List<dynamic> targetHands = isMeMain ? _backendHands : (_peerHands[_mainUserId] ?? []);
+       
        mainVideoWidget = Stack(
          fit: StackFit.expand,
          children: [
-           CameraPreview(_cameraController!),
-           // Локальная отрисовка ML Kit И виртуальных элементов (без костей от сервера)
-           CustomPaint(
-             painter: TrackingPainter(
-                useBackend: false, // для костей юзаем _localHands снизу
-                backendHands: [], // свои кости из бека не рисуем
-                localHands: _localHands,
-                imageSize: _imageSize,
-                virtualElements: _virtualElements,
-             ),
-           ),
-         ],
-       );
-     } else if (mainRenderer != null) {
-       // Показываем ЧУЖОЕ WebRTC видео (+ чужие кости из бэка)
-       mainVideoWidget = Stack(
-         fit: StackFit.expand,
-         children: [
-           RTCVideoView(mainRenderer, mirror: false, objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover),
-           // ОВЕРЛЕЙ НЕОНОВОГО ТРЕКИНГА
-           if ((_peerHands[_mainUserId] ?? []).isNotEmpty || _virtualElements.isNotEmpty)
+           videoView,
+           // ОВЕРЛЕЙ НЕОНОВОГО ТРЕКИНГА (рисует кости поверх видео)
+           if (targetHands.isNotEmpty)
              CustomPaint(
-               painter: TrackingPainter(
-                 useBackend: true,
-                 backendHands: _peerHands[_mainUserId] ?? [],
-                 localHands: [],
-                 virtualElements: _virtualElements,
-               ),
+               painter: NeonTrackingPainter(hands: targetHands),
              ),
          ],
        );
      }
      
-     // ДИНАМИЧЕСКИЙ СУБТИТР (Либо свой, либо того, кого мы смотрим крупно)
-     String displaySubtitle = isMeMain ? _currentSubtitle : (_peerSubtitles[_mainUserId] ?? "");
-     
      if (isDesktop) {
         return Row(
            children: [
               Expanded(flex: 6, child: mainVideoWidget),
-              if (gridItems.isNotEmpty || !isMeMain)
-                Container(
-                  width: 250,
-                  decoration: const BoxDecoration(
-                     border: Border(left: BorderSide(color: Colors.white24))
-                  ),
-                  child: ListView(
-                    padding: const EdgeInsets.all(8),
-                    children: gridItems,
-                  )
+              Container(
+                width: 280,
+                decoration: const BoxDecoration(
+                   border: Border(left: BorderSide(color: Colors.white24))
+                ),
+                child: Column(
+                   children: [
+                      if (gridItems.isNotEmpty)
+                         SizedBox(
+                            height: 150.0 * (gridItems.length > 2 ? 2 : gridItems.length),
+                            child: ListView(padding: const EdgeInsets.all(8), children: gridItems)
+                         ),
+                      Expanded(child: _buildChatPanel())
+                   ]
                 )
+              )
            ]
         );
      } else {
         return Stack(
           children: [
              Positioned.fill(child: mainVideoWidget),
+             
+             // Чат-субтитры поверх мобильного видео (снизу-слева)
+             Positioned(
+                 left: 10, right: 10, top: 20, bottom: 150,
+                 child: Align(
+                    alignment: Alignment.bottomLeft,
+                    child: SizedBox(
+                       width: 320,
+                       height: 250,
+                       child: _buildChatPanel(isMobile: true)
+                    )
+                 )
+             ),
+             
              if (gridItems.isNotEmpty)
                Positioned(
                  bottom: 20, left: 10, right: 10,
@@ -622,33 +675,6 @@ class _CallScreenState extends State<CallScreen> {
                       onPressed: _showMobileMenu,
                     )
                   ),
-              // СУБТИТРЫ (ПОКАЗЫВАЮТСЯ ВНИЗУ)
-              if (displaySubtitle.isNotEmpty)
-                Positioned(
-                  bottom: 150, left: 0, right: 0,
-                  child: Center(
-                    child: AnimatedOpacity(
-                      duration: const Duration(milliseconds: 300),
-                      opacity: displaySubtitle.isNotEmpty ? 1.0 : 0.0,
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
-                        decoration: BoxDecoration(
-                          color: Colors.black.withOpacity(0.7),
-                          borderRadius: BorderRadius.circular(12),
-                          border: Border.all(color: Colors.cyanAccent.withOpacity(0.5), width: 1),
-                          boxShadow: [
-                            BoxShadow(color: Colors.cyanAccent.withOpacity(0.2), blurRadius: 10, spreadRadius: 2)
-                          ]
-                        ),
-                        child: Text(
-                          displaySubtitle,
-                          style: const TextStyle(color: Colors.white, fontSize: 32, fontWeight: FontWeight.bold, letterSpacing: 1.2),
-                          textAlign: TextAlign.center,
-                        ),
-                      ),
-                    ),
-                  )
-                )
           ]
         );
      }
@@ -691,110 +717,74 @@ class _CallScreenState extends State<CallScreen> {
   }
 }
 
-// КРАСИВЫЙ НЕОНОВЫЙ ХУДОЖНИК ИЗ БЕТЫ (Универсальный: либо локальный ML Kit, либо WebRTC чужой)
-class TrackingPainter extends CustomPainter {
-  final bool useBackend;
-  final List<dynamic> backendHands;
-  final List<Hand> localHands;
-  final Size? imageSize;
-  final Map<String, dynamic> virtualElements;
+// КРАСИВЫЙ НЕОНОВЫЙ ХУДОЖНИК ИЗ БЕТЫ (Трекинг рук)
+class NeonTrackingPainter extends CustomPainter {
+  final List<dynamic> hands;
 
-  TrackingPainter({required this.useBackend, required this.backendHands, required this.localHands, this.imageSize, this.virtualElements = const {}});
+  NeonTrackingPainter({required this.hands});
 
   @override
   void paint(Canvas canvas, Size size) {
-    if (useBackend) {
-        // --- ОТРИСОВКА ЧУЖИХ РУК (ИЗ БЭКЕНДА) ---
-        if (backendHands.isEmpty && virtualElements.isEmpty) return;
-        
-        // 1. ОТРИСОВКА ВИРТУАЛЬНЫХ ЭЛЕМЕНТОВ
-        _drawVirtualElements(canvas, size);
+    if (hands.isEmpty) return;
 
-        // 2. ОТРИСОВКА НЕОНОВЫХ ЛИНИЙ
-        final linePaint = Paint()..color = Colors.cyanAccent.withOpacity(0.8)..style = PaintingStyle.stroke..strokeWidth = 4.0..strokeCap = StrokeCap.round;
-        final shadowPaint = Paint()..color = Colors.cyanAccent.withOpacity(0.3)..style = PaintingStyle.stroke..strokeWidth = 10.0..strokeCap = StrokeCap.round;
-        final dotPaint = Paint()..color = Colors.white..style = PaintingStyle.fill;
-        final innerDotPaint = Paint()..color = Colors.blueAccent..style = PaintingStyle.fill;
+    // 2. ОТРИСОВКА НЕОНОВЫХ ЛИНИЙ (КОСТИ И СУСТАВЫ)
+    final linePaint = Paint()
+      ..color = Colors.cyanAccent.withOpacity(0.8)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 4.0
+      ..strokeCap = StrokeCap.round;
+      
+    final shadowPaint = Paint()
+      ..color = Colors.cyanAccent.withOpacity(0.3)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 10.0
+      ..strokeCap = StrokeCap.round;
 
-        for (var hand in backendHands) {
-           for (var conn in _connections) {
-             if (conn[0] < hand.length && conn[1] < hand.length) {
-               final double x1 = (1.0 - hand[conn[0]]['x']) * size.width;
-               final double y1 = hand[conn[0]]['y'] * size.height;
-               final double x2 = (1.0 - hand[conn[1]]['x']) * size.width;
-               final double y2 = hand[conn[1]]['y'] * size.height;
+    final dotPaint = Paint()
+      ..color = Colors.white
+      ..style = PaintingStyle.fill;
+      
+    final innerDotPaint = Paint()
+      ..color = Colors.blueAccent
+      ..style = PaintingStyle.fill;
 
-               canvas.drawLine(Offset(x1, y1), Offset(x2, y2), shadowPaint);
-               canvas.drawLine(Offset(x1, y1), Offset(x2, y2), linePaint);
-             }
-           }
-           for (var lm in hand) {
-              canvas.drawCircle(Offset((1.0 - lm['x']) * size.width, lm['y'] * size.height), 6, dotPaint);
-              canvas.drawCircle(Offset((1.0 - lm['x']) * size.width, lm['y'] * size.height), 4, innerDotPaint);
-           }
-        }
-    } else {
-        // --- ОТРИСОВКА СВОИХ РУК (ЛОКАЛЬНЫЙ ML KIT) ---
-        _drawVirtualElements(canvas, size);
-        
-        if (localHands.isEmpty) return;
+    final connections = [
+      [0, 1], [1, 2], [2, 3], [3, 4], // Большой
+      [0, 5], [5, 6], [6, 7], [7, 8], // Указательный
+      [5, 9], [9, 10], [10, 11], [11, 12], // Средний
+      [9, 13], [13, 14], [14, 15], [15, 16], // Безымянный
+      [13, 17], [17, 18], [18, 19], [19, 20], // Мизинец
+      [0, 17] // Ладонь
+    ];
 
-        final linePaint = Paint()..color = Colors.greenAccent.withOpacity(0.8)..style = PaintingStyle.stroke..strokeWidth = 4.0..strokeCap = StrokeCap.round;
-        final shadowPaint = Paint()..color = Colors.greenAccent.withOpacity(0.3)..style = PaintingStyle.stroke..strokeWidth = 10.0..strokeCap = StrokeCap.round;
-        final dotPaint = Paint()..color = Colors.white..style = PaintingStyle.fill;
-        final innerDotPaint = Paint()..color = Colors.green..style = PaintingStyle.fill;
+    for (var hand in hands) {
+       // Отрисовка всех соединений
+       for (var conn in connections) {
+         if (conn[0] < hand.length && conn[1] < hand.length) {
+           final p1 = hand[conn[0]];
+           final p2 = hand[conn[1]];
+           
+           // X больше не зеркалируем здесь, так как бэкенд уже присылает правильные координаты
+           final double x1 = p1['x'] * size.width;
+           final double y1 = p1['y'] * size.height;
+           final double x2 = p2['x'] * size.width;
+           final double y2 = p2['y'] * size.height;
 
-        for (var hand in localHands) {
-           for (var conn in _connections) {
-             if (conn[0] < hand.landmarks.length && conn[1] < hand.landmarks.length) {
-               final double x1 = (1.0 - hand.landmarks[conn[0]].x) * size.width;
-               final double y1 = hand.landmarks[conn[0]].y * size.height;
-               final double x2 = (1.0 - hand.landmarks[conn[1]].x) * size.width;
-               final double y2 = hand.landmarks[conn[1]].y * size.height;
+           canvas.drawLine(Offset(x1, y1), Offset(x2, y2), shadowPaint);
+           canvas.drawLine(Offset(x1, y1), Offset(x2, y2), linePaint);
+         }
+       }
 
-               canvas.drawLine(Offset(x1, y1), Offset(x2, y2), shadowPaint);
-               canvas.drawLine(Offset(x1, y1), Offset(x2, y2), linePaint);
-             }
-           }
-           for (var lm in hand.landmarks) {
-              canvas.drawCircle(Offset((1.0 - lm.x) * size.width, lm.y * size.height), 6, dotPaint);
-              canvas.drawCircle(Offset((1.0 - lm.x) * size.width, lm.y * size.height), 4, innerDotPaint);
-           }
-        }
+       // Отрисовка суставов (точки)
+       for (var lm in hand) {
+          double cx = lm['x'] * size.width;
+          double cy = lm['y'] * size.height;
+          canvas.drawCircle(Offset(cx, cy), 6, dotPaint);
+          canvas.drawCircle(Offset(cx, cy), 4, innerDotPaint);
+       }
     }
   }
-
-  void _drawVirtualElements(Canvas canvas, Size size) {
-    if (virtualElements.isEmpty) return;
-    
-    final button = virtualElements['button'];
-    if (button != null && button['visible'] == true && button['pos'] != null) {
-       final double bx = (1.0 - button['pos']['x']) * size.width;
-       final double by = button['pos']['y'] * size.height;
-       final btnPaint = Paint()..color = Colors.orangeAccent..style = PaintingStyle.fill;
-       canvas.drawCircle(Offset(bx, by), 30, btnPaint);
-       final tp = TextPainter(text: const TextSpan(style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold), text: 'PRESS'), textAlign: TextAlign.center, textDirection: TextDirection.ltr)..layout();
-       tp.paint(canvas, Offset(bx - tp.width / 2, by - tp.height / 2));
-    }
-    
-    final block = virtualElements['block'];
-    if (block != null && block['visible'] == true && block['pos'] != null) {
-       final double bx = (1.0 - block['pos']['x']) * size.width;
-       final double by = block['pos']['y'] * size.height;
-       final blockPaint = Paint()..color = block['grabbed'] == true ? Colors.redAccent : Colors.tealAccent..style = PaintingStyle.fill;
-       canvas.drawRect(Rect.fromLTWH(bx - 30.0, by - 30.0, 60.0, 60.0), blockPaint);
-    }
-  }
-
-  static const _connections = [
-    [0, 1], [1, 2], [2, 3], [3, 4], // Thumb
-    [0, 5], [5, 6], [6, 7], [7, 8], // Index
-    [5, 9], [9, 10], [10, 11], [11, 12], // Middle
-    [9, 13], [13, 14], [14, 15], [15, 16], // Ring
-    [13, 17], [17, 18], [18, 19], [19, 20], // Pinky
-    [0, 17] // Palm base
-  ];
 
   @override
-  bool shouldRepaint(covariant TrackingPainter oldDelegate) => true;
+  bool shouldRepaint(covariant NeonTrackingPainter oldDelegate) => true;
 }

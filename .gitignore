@@ -116,3 +116,5 @@ app.*.map.json
 **/android/app/debug
 **/android/app/profile
 **/android/app/release
+
+/lib/core/config/env.dart
