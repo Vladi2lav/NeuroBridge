@@ -9,15 +9,15 @@ import 'dart:async';
 
 class VoiceCommandContext {
   final String screenName;
-  final Function() onCreateRoom;
-  final Function(String code) onJoinRoom;
-  final Function() onJoinCall;
+  final String description;
+  final Map<String, String> availableActions;
+  final Function(String action) onAction;
 
   VoiceCommandContext({
     required this.screenName,
-    required this.onCreateRoom,
-    required this.onJoinRoom,
-    required this.onJoinCall,
+    required this.description,
+    required this.availableActions,
+    required this.onAction,
   });
 }
 
@@ -40,6 +40,7 @@ class VoiceAssistant {
   bool _isInit = false;
   bool isBlindModeActive = false; 
   bool _isSpeaking = false;
+  Timer? _silenceTimer;
 
   final ValueNotifier<String> currentSpeechContent = ValueNotifier<String>('');
   VoiceCommandContext? currentContext;
@@ -55,7 +56,13 @@ class VoiceAssistant {
        await _speech.initialize(
          onStatus: (status) {
            if (status == 'notListening' && isBlindModeActive) {
-             _listenForWakeWord();
+             // Предотвращение ошибки error_client (бесконечный цикл пиликанья):
+             // Выжидаем 1 секунду перед перезапуском
+             Future.delayed(const Duration(seconds: 1), () {
+               if (isBlindModeActive && !_speech.isListening && !_isSpeaking) {
+                  _listenForWakeWord();
+               }
+             });
            }
          },
          onError: (error) => debugPrint('STT Error: $error'),
@@ -80,23 +87,18 @@ class VoiceAssistant {
          if (_chatHistory.length > 20) _chatHistory.removeRange(0, _chatHistory.length - 20);
       }
 
+      String localActions = currentContext?.availableActions.entries.map((e) => "- [ACTION:${e.key}]: ${e.value}").join("\n") ?? "";
       final systemPrompt = '''
-Ты голосовой помощник по имени "Данил" (или "Даня"). Работай в приложении видеозвонков. Твой голос и интонация должны быть дружелюбными и помогающими.
+Ты голосовой помощник по имени "Данил" (или "Даня"). Работай в приложении видеозвонков.
 Текущий экран: ${currentContext?.screenName ?? 'Неизвестно'}.
+Описание экрана: ${currentContext?.description ?? ''}.
 
-Если пользователь просит помощи ("что ты умеешь?", "помоги", "какие функции здесь есть?"), ОБЯЗАТЕЛЬНО четко и понятно перечисли функции, доступные на текущем экране.
+Доступные функции:
+$localActions
 
-Если экран "MainScreen":
-Доступные функции: 1) Создание комнаты; 2) Присоединение к уроку (комнате) по коду.
-- Если пользователь хочет "создать комнату". Ответь ТОЛЬКО тегом: "[ACTION:CREATE_ROOM]"
-- Если пользователь хочет "вступить в комнату" или "присоединиться" (он должен назвать код комнаты цифрами, например 1234). Ответь ТОЛЬКО тегом: "[ACTION:JOIN_ROOM|кодизцифр]".
-
-Если экран "RoomScreen":
-Доступные функции: Подключение к видеозвонку (встрече).
-- Если пользователь хочет "войти в звонок". Ответь ТОЛЬКО тегом: "[ACTION:JOIN_CALL]"
-
-Если команда непонятна, или это просто вопрос - отвечай вежливо и коротко как помощник.
-Если ты распознал команду интерфейса (создать, вступить) - ВЕРНИ ИСКЛЮЧИТЕЛЬНО ТЕГ [ACTION:...], и больше никаких слов.
+Если пользователь просит помощи, понятно перечисли эти функции.
+Если пользователь хочет выполнить одно из действий (создать, присоединиться, открыть настройки) - ВЕРНИ ТОЛЬКО ТЕГ [ACTION:код_действия] без других слов. При присоединении используй формат [ACTION:JOIN_ROOM|код].
+Если это обычный вопрос - отвечай вежливо.
 ''';
 
       Map<String, dynamic> requestBody = {
@@ -174,12 +176,22 @@ class VoiceAssistant {
   }
 
   Future<void> determineBlindness(String answer, Function(bool) onResult) async {
-      final prompt = '''
-Пользователю задали вопрос: "Можете ли вы видеть?". Он ответил: "$answer". Выведи только слово "BLIND" если он нуждается в помощи или у него проблемы со зрением, иначе выведи "NOT_BLIND". Никаких других символов.
-''';      
-      final res = await _sendToGemini(prompt, requestAudio: false, addToHistory: false);
-      bool blind = res.text.contains("BLIND") && !res.text.contains("NOT_BLIND");
-      onResult(blind);
+      final ans = answer.toLowerCase();
+      bool negative = ans.contains("не вижу") || ans.contains("не могу") || RegExp(r'\bнет\b').hasMatch(ans) || ans.contains("плохо") || ans.contains("слеп");
+      bool positive = ans.contains("вижу") || ans.contains("могу") || RegExp(r'\bда\b').hasMatch(ans) || ans.contains("конечно");
+
+      if (negative && !positive) {
+          onResult(true);
+      } else if (positive && !negative) {
+          onResult(false);
+      } else if (negative && positive) {
+          onResult(true);
+      } else {
+          final prompt = 'Пользователю задали вопрос: "Можете ли вы видеть?". Он ответил: "$answer". Выведи только слово "BLIND" если он нуждается в помощи или у него проблемы со зрением, иначе выведи "NOT_BLIND". Никаких других символов.';      
+          final res = await _sendToGemini(prompt, requestAudio: false, addToHistory: false);
+          bool blind = res.text.contains("BLIND") && !res.text.contains("NOT_BLIND");
+          onResult(blind);
+      }
   }
 
   Future<String> generateWelcomeSpeech() async {
@@ -226,12 +238,21 @@ class VoiceAssistant {
     await _speech.listen(
       localeId: 'ru_RU',
       cancelOnError: true,
-      pauseFor: const Duration(seconds: 4),
+      pauseFor: const Duration(milliseconds: 1500),
       onResult: (result) {
          currentSpeechContent.value = result.recognizedWords;
-         if (result.finalResult && !completer.isCompleted) {
+         
+         final lower = result.recognizedWords.toLowerCase();
+         bool negative = lower.contains("не вижу") || lower.contains("не могу") || RegExp(r'\bнет\b').hasMatch(lower);
+         bool positive = lower.contains("вижу") || lower.contains("могу") || RegExp(r'\bда\b').hasMatch(lower);
+
+         if ((negative || positive) && !completer.isCompleted) {
+             _speech.stop();
+             completer.complete(result.recognizedWords);
+             Future.delayed(const Duration(milliseconds: 500), () => currentSpeechContent.value = '');
+         } else if (result.finalResult && !completer.isCompleted) {
             completer.complete(result.recognizedWords);
-            Future.delayed(const Duration(milliseconds: 1000), () => currentSpeechContent.value = '');
+            Future.delayed(const Duration(milliseconds: 500), () => currentSpeechContent.value = '');
          }
       }
     );
@@ -250,14 +271,32 @@ class VoiceAssistant {
       localeId: 'ru_RU',
       cancelOnError: false,
       partialResults: true,
-      onResult: (result) {
-        final words = result.recognizedWords.toLowerCase();
+      listenMode: stt.ListenMode.dictation,
+      pauseFor: const Duration(hours: 1), // Максимальная пауза чтобы не пиликало и не выключался микро
+      onResult: (result) async {
         currentSpeechContent.value = result.recognizedWords;
-        if (words.contains('данил') || words.contains('даня') || words.contains('нейро')) {
-           _speech.stop();
-           currentSpeechContent.value = '';
-           _handleCommandSession();
-        } else if (result.finalResult) {
+        _silenceTimer?.cancel();
+
+        if (result.recognizedWords.isNotEmpty) {
+           // Ждем 2 секунды тишины, прежде чем обрабатывать фразу
+           _silenceTimer = Timer(const Duration(seconds: 2), () async {
+               final words = result.recognizedWords.toLowerCase();
+               
+               if (words.contains('данил') || words.contains('даня') || words.contains('нейро')) {
+                  _speech.stop();
+                  currentSpeechContent.value = '';
+                  final cleanWords = words.replaceAll(RegExp(r'[^\w\sа-яА-Я]'), '').trim();
+                  
+                  if (cleanWords == 'данил' || cleanWords == 'даня' || cleanWords == 'нейро') {
+                     _handleCommandSession();
+                  } else {
+                     await _processCommand(result.recognizedWords);
+                  }
+               }
+           });
+        }
+        
+        if (result.finalResult) {
            Future.delayed(const Duration(milliseconds: 1000), () => currentSpeechContent.value = '');
         }
       },
@@ -268,17 +307,24 @@ class VoiceAssistant {
      await speak("Слушаю вас.");
      
      if (!_speech.isAvailable) return;
+     await Future.delayed(const Duration(milliseconds: 500));
 
      await _speech.listen(
        localeId: 'ru_RU',
        cancelOnError: true,
-       pauseFor: const Duration(seconds: 4),
+       listenMode: stt.ListenMode.dictation,
+       pauseFor: const Duration(hours: 1),
        onResult: (result) async {
           currentSpeechContent.value = result.recognizedWords;
-          if (result.finalResult) {
-            final cmd = result.recognizedWords;
-            Future.delayed(const Duration(milliseconds: 500), () => currentSpeechContent.value = '');
-            await _processCommand(cmd);
+          _silenceTimer?.cancel();
+          
+          if (result.recognizedWords.isNotEmpty) {
+             _silenceTimer = Timer(const Duration(seconds: 2), () async {
+                 final cmd = result.recognizedWords;
+                 _speech.stop();
+                 currentSpeechContent.value = '';
+                 await _processCommand(cmd);
+             });
           }
        }
      );
@@ -294,33 +340,13 @@ class VoiceAssistant {
      final res = await _sendToGemini(text, requestAudio: false, addToHistory: true);
      final resText = res.text;
 
-     if (resText.contains("[ACTION:CREATE_ROOM]")) {
-         if (currentContext!.screenName == "MainScreen") {
-            await speak("Уже создаю.");
-            currentContext!.onCreateRoom();
-         } else {
-            await speak("Вы уже в комнате.");
-         }
-     } else if (resText.contains("[ACTION:JOIN_ROOM|")) {
-         if (currentContext!.screenName == "MainScreen") {
-            final regex = RegExp(r"\[ACTION:JOIN_ROOM\|(\d+)\]");
-            final match = regex.firstMatch(resText);
-            if (match != null && match.groupCount > 0) {
-               final code = match.group(1)!;
-               await speak("Вступаю в комнату $code.");
-               currentContext!.onJoinRoom(code);
-            } else {
-               await speak("Я не расслышал, продиктуйте код комнаты по одной цифре.");
-            }
-         } else {
-             await speak("Вы уже в комнате.");
-         }
-     } else if (resText.contains("[ACTION:JOIN_CALL]")) {
-         if (currentContext!.screenName == "RoomScreen") {
-             await speak("Захожу в звонок.");
-             currentContext!.onJoinCall();
-         } else {
-             await speak("Сначала нужно вступить в комнату.");
+     if (resText.contains("[ACTION:")) {
+         final regex = RegExp(r"\[ACTION:([^\]]+)\]");
+         final match = regex.firstMatch(resText);
+         if (match != null && match.groupCount > 0) {
+             final actionCall = match.group(1)!;
+             await speak("Выполняю.");
+             currentContext!.onAction(actionCall);
          }
      } else {
          if (resText.isNotEmpty) {

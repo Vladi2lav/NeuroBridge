@@ -40,12 +40,23 @@ class _MainScreenState extends State<MainScreen> {
     
     VoiceAssistant().currentContext = VoiceCommandContext(
       screenName: "MainScreen",
-      onCreateRoom: () => _createRoom(),
-      onJoinRoom: (code) {
-         _roomController.text = code;
-         _joinRoom();
+      description: "Главный экран приложения NeuroBridge. Здесь можно создать комнату или присоединиться к ней по номеру.",
+      availableActions: {
+         "CREATE_ROOM": "Создать новую комнату для звонка",
+         "JOIN_ROOM": "Присоединиться по коду. ТЕГ должен содержать код: [ACTION:JOIN_ROOM|кодизцифр]",
+         "OPEN_SETTINGS": "Открыть настройки приложения",
       },
-      onJoinCall: () {}
+      onAction: (action) {
+         if (action == "CREATE_ROOM") {
+             _createRoom();
+         } else if (action.startsWith("JOIN_ROOM|")) {
+             final code = action.split("|")[1].trim();
+             _roomController.text = code;
+             _joinRoom();
+         } else if (action == "OPEN_SETTINGS") {
+             context.push('/settings');
+         }
+      }
     );
 
     if (_selectedProfiles.contains("Нарушения зрения")) {

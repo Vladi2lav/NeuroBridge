@@ -163,7 +163,11 @@ class _CallScreenState extends State<CallScreen> {
          onStatus: (status) {
             // Если STT остановилось (пауза в речи), но микрофон включен - запускаем снова
             if (status == 'notListening' && _isAudioOn && mounted) {
-               _startListeningSpeech();
+               Future.delayed(const Duration(seconds: 1), () {
+                 if (_isAudioOn && mounted && !_speech.isListening) {
+                   _startListeningSpeech();
+                 }
+               });
             }
          },
          onError: (e) => print("STT ошибка: $e")
@@ -184,6 +188,8 @@ class _CallScreenState extends State<CallScreen> {
        localeId: 'ru_RU',
        cancelOnError: false,
        partialResults: true,
+       listenMode: stt.ListenMode.dictation,
+       pauseFor: const Duration(hours: 1), // Не выключать микро как можно дольше
        onResult: (result) {
           if (result.recognizedWords.isNotEmpty && mounted) {
              setState(() {
@@ -251,22 +257,32 @@ class _CallScreenState extends State<CallScreen> {
 
   // --- ЛОГИКА ОТПРАВКИ КАДРОВ ---
   void _startCaptureLoop() {
-    print("🚀 [ТРЕКИНГ] Запуск умного адаптивного потока кадров...");
+    print("🚀 [ТРЕКИНГ] Запуск оптимизированного потока кадров...");
+    
+    DateTime _lastFrameTime = DateTime.now();
+
     _frameCaptureTimer = Timer.periodic(const Duration(milliseconds: 50), (timer) async {
        if (_isProcessingFrame || _isAwaitingServer || _trackingChannel == null) return;
+       
+       // Ждем минимум 250 мс между кадрами (Максимум 4 FPS),
+       // чтобы не блокировать UI-поток (из-за чего отставало видео камеры).
+       // Если нужно быстрее, можно снизить до 200, но это золотая середина.
+       if (DateTime.now().difference(_lastFrameTime).inMilliseconds < 250) return;
+
        _isProcessingFrame = true;
 
        try {
          RenderRepaintBoundary? boundary = _localVideoKey.currentContext?.findRenderObject() as RenderRepaintBoundary?;
          if (boundary != null) {
-           ui.Image image = await boundary.toImage(pixelRatio: 0.3); // Увеличено в 1.5 раза (было 0.2)
+           _lastFrameTime = DateTime.now();
+           // pixelRatio снижен до 0.15 для резкого ускорения toImage()
+           ui.Image image = await boundary.toImage(pixelRatio: 0.15); 
            ByteData? byteData = await image.toByteData(format: ui.ImageByteFormat.rawRgba);
            
            if (byteData != null) {
              final bytes = byteData.buffer.asUint8List();
-             // print("📸 [ТРЕКИНГ] Успешный снимок кадра: ${image.width}x${image.height}, bytes: ${bytes.length}");
              
-             int formatCode = 2; // RGBA8888! 
+             int formatCode = 2; // RGBA8888 
              var header = ByteData(16);
              header.setUint8(0, formatCode);
              header.setUint32(1, image.width, Endian.little);
@@ -278,24 +294,14 @@ class _CallScreenState extends State<CallScreen> {
              builder.add(bytes);
              
              _trackingChannel!.sink.add(builder.toBytes());
-             
-             // БЛОКИРУЕМ ОТПРАВКУ ДО ОТВЕТА
              setState(() => _isAwaitingServer = true);
              
-             // Резервный таймаут, вдруг пакет потерялся
-             // ОШИБКА: 500ms было слишком мало! Если сервер отвечал дольше, таймер спамил 
-             // новыми кадрами, создавая бесконечную очередь, что приводило к задержкам по 30 сек.
-             Timer(const Duration(milliseconds: 5000), () {
+             Timer(const Duration(milliseconds: 3000), () {
                  if (mounted && _isAwaitingServer) {
                      setState(() => _isAwaitingServer = false);
                  }
              });
-             
-           } else {
-             print("❌ [ТРЕКИНГ] Не удалось получить byteData (NULL)");
            }
-         } else {
-             // print("⏳ [ТРЕКИНГ] Ожидаем отрисовки видео WebRTC (виджет не готов)...");
          }
        } catch (e) {
          print("🚨 [ТРЕКИНГ] Ошибка при снятии скриншота: $e");

@@ -44,10 +44,20 @@ class _RoomScreenState extends State<RoomScreen> {
   void _initVoice() {
     VoiceAssistant().currentContext = VoiceCommandContext(
       screenName: "RoomScreen",
-      onCreateRoom: () {},
-      onJoinRoom: (c) {},
-      onJoinCall: () {
-         if (mounted) setState(() { _callStarted = true; _tabIndex = 0; });
+      description: "Экран комнаты и подготовки к звонку. Можно переключаться между вкладками 'Материалы' и 'Видеозвонок'.",
+      availableActions: {
+         "JOIN_CALL": "Начать или присоединиться к видеозвонку",
+         "OPEN_MATERIALS": "Открыть вкладку 'Материалы'",
+         "OPEN_SETTINGS": "Открыть настройки",
+      },
+      onAction: (action) {
+         if (action == "JOIN_CALL") {
+             if (mounted) setState(() { _callStarted = true; _tabIndex = 0; });
+         } else if (action == "OPEN_MATERIALS") {
+             if (mounted) setState(() { _tabIndex = 1; });
+         } else if (action == "OPEN_SETTINGS") {
+             context.push('/settings');
+         }
       }
     );
      if (VoiceAssistant().isBlindModeActive && widget.isCreator) {
